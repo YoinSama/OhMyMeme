@@ -856,6 +856,36 @@ def _push_worker(entries, remote_root, cache_dir, remote_memes):
         bk.close()
 
 
+def _merge_remote_ai(db, rentry: dict, fname: str = "", row=None) -> int:
+    """把远端清单的 AI 标注补到本地：仅填补本地空缺，不覆盖已有标注
+
+    远端清单缺少 AI 字段（老版本）时直接返回，不做任何数据库查询。
+    返回实际写入的字段数。
+    """
+    if not isinstance(rentry, dict):
+        return 0
+    wanted = {}
+    for key in ("ai_description", "ai_ocr_text"):
+        val = str(rentry.get(key) or "").strip()
+        if val:
+            wanted[key] = val
+    if not wanted:
+        return 0
+    if row is None:
+        row = db.get_by_filename(fname)
+    if not row:
+        return 0
+    updates = {k: v for k, v in wanted.items() if not str(row.get(k) or "").strip()}
+    if not updates:
+        return 0
+    try:
+        db.update_meme(row["id"], **updates)
+        return len(updates)
+    except Exception as e:
+        logger.warning("merge remote ai fields failed %s: %s", fname or row["id"], e)
+        return 0
+
+
 def _pull_worker(entries, remote_root, cache_dir, db):
     """单线程批量下载一批文件"""
     bk = _get_backend()
@@ -887,6 +917,8 @@ def _pull_worker(entries, remote_root, cache_dir, db):
                 and local_entry.get("sha256") == rentry.get("sha256")
                 and (cache_dir / fname).exists()
             ):
+                # 文件一致时跳过下载，但 AI 标注仍要同步（远端有值且本地为空才写）
+                _merge_remote_ai(db, rentry, fname=fname)
                 local_results["skipped"] += 1
                 _increment_sync_progress(files_add=1)
                 continue
@@ -907,6 +939,9 @@ def _pull_worker(entries, remote_root, cache_dir, db):
                         pass
                     continue
                 row = db.get_by_filename(fname)
+                if row:
+                    # 本地已有记录：顺带补齐远端 AI 标注（远端有值且本地为空才写）
+                    _merge_remote_ai(db, rentry, row=row)
                 if not row:
                     try:
                         ext = os.path.splitext(fname)[1].lower()
@@ -939,6 +974,7 @@ def _pull_worker(entries, remote_root, cache_dir, db):
                             mime_type="image/%s" % ext[1:] if ext else "image/png",
                             original_name=oname,
                         )
+                        _merge_remote_ai(db, rentry, fname=fname)
                     except Exception as e:
                         # DB 写入失败：清理残留 cache，避免“文件在但无记录”的游离态
                         logger.warning("pull db add failed %s: %s", fname, e)

@@ -179,6 +179,8 @@ class MemeDB:
             ("memes", "stego_of_hash", "TEXT DEFAULT NULL"),
             ("memes", "from_stego", "INTEGER DEFAULT 0"),
             ("memes", "perceptual_hash", "TEXT DEFAULT NULL"),
+            ("memes", "ai_description", "TEXT NOT NULL DEFAULT ''"),
+            ("memes", "ai_ocr_text", "TEXT NOT NULL DEFAULT ''"),
             (
                 "collections",
                 "parent_id",
@@ -380,6 +382,8 @@ class MemeDB:
             "original_name",
             "stego_of_hash",
             "from_stego",
+            "ai_description",
+            "ai_ocr_text",
             # perceptual_hash 不在此列：写统一走 set_perceptual_hash（hex 序列化）
         }
         sets = []
@@ -772,6 +776,7 @@ class MemeDB:
         collection_id: int = None,
         favorite_only: bool = False,
         uncategorized_only: bool = False,
+        ai_pending_only: bool = False,
         offset: int = 0,
         limit: int = 100,
     ) -> List[dict]:
@@ -782,11 +787,12 @@ class MemeDB:
         if keyword:
             kw = f"%{keyword}%"
             where.append(
-                "(m.filename LIKE ? OR m.original_name LIKE ? OR m.id IN ("
+                "(m.filename LIKE ? OR m.original_name LIKE ? "
+                "OR m.ai_ocr_text LIKE ? OR m.id IN ("
                 "SELECT mt.meme_id FROM meme_tags mt "
                 "JOIN tags t ON t.id = mt.tag_id WHERE t.name LIKE ?))"
             )
-            params.extend([kw, kw, kw])
+            params.extend([kw, kw, kw, kw])
 
         if tags:
             placeholders = ",".join("?" for _ in tags)
@@ -823,6 +829,10 @@ class MemeDB:
                 SELECT 1 FROM meme_collections mc WHERE mc.meme_id = m.id
             )""")
 
+        if ai_pending_only:
+            # 只看尚未 AI 标注过的：两列均为空即未标注
+            where.append("(m.ai_description = '' AND m.ai_ocr_text = '')")
+
         sql = "SELECT m.* FROM memes m"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -851,6 +861,7 @@ class MemeDB:
         collection_id: int = None,
         favorite_only: bool = False,
         uncategorized_only: bool = False,
+        ai_pending_only: bool = False,
     ) -> int:
         conn = self._get_conn()
         where = ["(stego_of_hash IS NULL OR stego_of_hash = '')"]
@@ -858,11 +869,12 @@ class MemeDB:
         if keyword:
             kw = f"%{keyword}%"
             where.append(
-                "(filename LIKE ? OR original_name LIKE ? OR memes.id IN ("
+                "(filename LIKE ? OR original_name LIKE ? "
+                "OR ai_ocr_text LIKE ? OR memes.id IN ("
                 "SELECT mt.meme_id FROM meme_tags mt "
                 "JOIN tags t ON t.id = mt.tag_id WHERE t.name LIKE ?))"
             )
-            params.extend([kw, kw, kw])
+            params.extend([kw, kw, kw, kw])
         if tags:
             placeholders = ",".join("?" for _ in tags)
             where.append(f"""id IN (
@@ -892,6 +904,8 @@ class MemeDB:
             where.append("""NOT EXISTS (
                 SELECT 1 FROM meme_collections WHERE meme_id = memes.id
             )""")
+        if ai_pending_only:
+            where.append("(ai_description = '' AND ai_ocr_text = '')")
         sql = "SELECT COUNT(*) FROM memes"
         if where:
             sql += " WHERE " + " AND ".join(where)

@@ -61,6 +61,9 @@ def build() -> List[Dict]:
                 "sha256": r.get("file_hash", ""),
                 "file_size": r.get("file_size", 0),
                 "mtime": mtime,
+                # AI 标注随清单同步；老版本清单没有这两个键，读取方按缺省处理
+                "ai_description": r.get("ai_description", "") or "",
+                "ai_ocr_text": r.get("ai_ocr_text", "") or "",
             }
         )
 

@@ -137,13 +137,6 @@
         <span class="import-name">电脑版 QQ（QQNT 本地缓存）</span>
       </button>
 
-      <button class="import-row" onclick="openTGImportDialog()">
-        <span class="import-ico">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.7 3.3L2.9 10.6c-.8.3-.7 1.5.1 1.7l4.6 1.5 1.7 5.1c.2.7 1.1.9 1.6.4l2.4-2.4 4.4 3.2c.6.4 1.4.1 1.6-.6l3.5-15.1c.2-.9-.7-1.6-1.5-1.3zm-12.2 9.3l7.7-5.8c.3-.2.6.2.3.5l-6.2 6.3-.3 3.2-1.5-4.2z"/></svg>
-        </span>
-        <span class="import-name">Telegram Desktop</span>
-      </button>
-
       <button class="import-row" onclick="openDYImportDialog()">
         <span class="import-ico">
           <svg viewBox="0 0 1024 1024" fill="currentColor"><path d="M937.4 423.9c-84 0-165.7-27.3-232.9-77.8v352.3c0 179.9-138.6 325.6-309.6 325.6S85.3 878.3 85.3 698.4c0-179.9 138.6-325.6 309.6-325.6 17.1 0 33.7 1.5 49.9 4.3v186.6c-15.5-6.1-32-9.2-48.6-9.2-76.3 0-138.2 65-138.2 145.3 0 80.2 61.9 145.3 138.2 145.3 76.2 0 138.1-65.1 138.1-145.3V0H707c0 134.5 103.7 243.5 231.6 243.5v180.3l-1.2 0.1"/></svg>
@@ -157,6 +150,54 @@
         </span>
         <span class="import-name">微信</span>
       </button>
+    </div>
+
+    <div class="section" data-group="import">
+      <div class="section-title">AI 自动标注</div>
+      <p style="font-size:11.5px;color:var(--muted);margin-bottom:12px;line-height:1.6">用多模态模型给表情自动生成「标签-内容描述」的名称与图上文字。支持任意 OpenAI 兼容服务商或中转站，API Key 加密保存在本机</p>
+
+      <div class="form-group">
+        <label>API 地址</label>
+        <input id="s-ai-base-url" placeholder="https://api.example.com/v1">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input id="s-ai-api-key" type="password" placeholder="sk-...">
+      </div>
+      <div class="form-group">
+        <label>多模态模型</label>
+        <select id="s-ai-model"></select>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm btn-flex" onclick="fetchAIModels()">拉取模型列表</button>
+        <button class="btn btn-ghost btn-sm" onclick="testAIConnection()">测试连接</button>
+      </div>
+      <div id="s-ai-status" style="font-size:11.5px;color:var(--muted);margin:8px 0 12px;line-height:1.6"></div>
+
+      <div class="form-group">
+        <label>标注风格</label>
+        <select id="s-ai-style">
+          <option value="general">通用聊天</option>
+          <option value="anime">二次元</option>
+          <option value="work">职场</option>
+          <option value="gaming">游戏群</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>每批数量</label>
+        <input id="s-ai-batch-size" type="number" min="1" max="500" value="50">
+      </div>
+      <div class="form-group">
+        <label>并发请求数</label>
+        <input id="s-ai-concurrency" type="number" min="1" max="8" value="4">
+      </div>
+      <label class="check-row" style="margin-bottom:8px">
+        <input id="s-ai-auto-tag" type="checkbox">导入表情后自动标注
+      </label>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary btn-sm btn-flex" onclick="startAITagging()">保存并标注一批</button>
+      </div>
+      <div id="s-ai-run-status" style="font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.6"></div>
     </div>
 
     <div class="section" data-group="network">
@@ -545,48 +586,6 @@
       <button id="qqnt-prev" class="btn btn-secondary btn-sm" onclick="qqntPrev()">上一步</button>
       <button id="qqnt-next" class="btn btn-primary btn-sm" onclick="qqntNext()">下一步</button>
       <button id="qqnt-close" class="btn btn-ghost btn-sm" onclick="qqntClose()">关闭</button>
-    </div>
-  </div>
-</div>
-
-<div id="tg-import-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);align-items:center;justify-content:center;z-index:400;animation:fadeIn .15s">
-  <div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px 28px;width:440px;border:1px solid var(--border);box-shadow:var(--shadow-lg)">
-    <div id="tg-config" style="display:block">
-      <div style="font-size:14px;font-weight:600;color:var(--fg);margin-bottom:4px">从 Telegram Desktop 导入</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">从 Telegram Desktop 本地缓存解密提取表情包（WebP 直取，WebM 无损转 WebP 并保留透明通道）</div>
-      <div class="form-group">
-        <label>tdata 目录</label>
-        <input id="s-tg-tdata" readonly placeholder="未设置，将自动检测">
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <button id="btn-tg-pick" class="btn btn-secondary btn-sm btn-flex" onclick="pickTGTdata()">手动指定 tdata 目录</button>
-      </div>
-      <div class="form-group" style="margin-bottom:10px">
-        <label>本地密码（可选）</label>
-        <input id="s-tg-passcode" type="password" placeholder="Telegram Desktop 设置了本地密码时填写" autocomplete="off">
-      </div>
-      <label class="check-row" style="margin-bottom:12px">
-        <input id="s-tg-convert" type="checkbox" checked>WebM 转 WebP（保留透明动画，需 ffmpeg）
-      </label>
-      <div id="tg-status" style="font-size:11.5px;color:var(--muted);margin-bottom:10px;word-break:break-all;line-height:1.6"></div>
-      <div style="display:flex;gap:8px">
-        <button id="btn-tg-start" class="btn btn-primary btn-sm btn-flex" onclick="startTGImport()">开始导入</button>
-        <button class="btn btn-secondary btn-sm" onclick="closeTGOverlay()">取消</button>
-      </div>
-    </div>
-    <div id="tg-progress" style="display:none;text-align:center">
-      <div style="font-size:14px;font-weight:600;color:var(--fg);margin-bottom:4px" id="tg-import-title">正在导入...</div>
-      <div style="font-size:12px;color:var(--fg-secondary);margin-bottom:12px;word-break:break-all" id="tg-import-msg">准备中</div>
-      <div style="width:100%;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-bottom:6px">
-        <div id="tg-import-bar" style="width:0%;height:100%;background:var(--accent);border-radius:4px;transition:width .3s"></div>
-      </div>
-      <div style="font-size:11.5px;color:var(--muted);margin-bottom:16px">
-        <span id="tg-import-pct">0%</span>
-        <span id="tg-import-eta" style="margin-left:8px"></span>
-      </div>
-      <button id="btn-tg-retry" class="btn btn-secondary btn-sm" onclick="tgRetryPick()" style="display:none">手动选择 tdata 目录</button>
-      <button id="btn-tg-close" class="btn btn-secondary btn-sm" onclick="closeTGOverlay()">关闭</button>
-      <div id="tg-import-error" style="display:none;font-size:12px;color:var(--danger);margin-top:8px;word-break:break-all"></div>
     </div>
   </div>
 </div>

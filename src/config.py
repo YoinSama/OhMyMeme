@@ -23,6 +23,7 @@ _SECRET_KEYS = {
     "ftp_password",
     "webdav_password",
     "lan_secret",
+    "ai_api_key",
 }
 
 # ~~~ 导入限制 ~~~（超过限制的图片拒绝入库）
@@ -116,8 +117,14 @@ class Config:
         # 局域网互联
         "lan_port": 17852,  # 局域网服务端口
         "lan_secret": "",  # 互联访问密钥（加密存储）
-        # Telegram 导入
-        "tg_tdata_path": "",  # 手动指定的 Telegram tdata 目录
+        # AI 标注（OpenAI 兼容接口，支持任意中转站）
+        "ai_base_url": "",  # API 地址，如 https://api.example.com/v1
+        "ai_api_key": "",  # API 密钥（加密存储）
+        "ai_model": "",  # 多模态模型名（从 /v1/models 拉取后选择）
+        "ai_organize_style": "general",  # 标注风格：general|anime|work|gaming
+        "ai_batch_size": 50,  # 每批标注数量（1-500）
+        "ai_auto_tag_on_import": False,  # 导入后自动标注新表情
+        "ai_concurrency": 4,  # 标注并发请求数（1-8）
         # UI
         "theme": "dark",
         "window_x": -1,

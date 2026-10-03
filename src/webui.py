@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 # WSL 环境强制软件渲染（必须在导入 webview/GUI 之前设置）
@@ -57,7 +58,7 @@ try:
 except ImportError:
     HAS_BOTTLE = False
 
-from . import adb_util, backup, qqnt_extract, tg_stickers, updater
+from . import adb_util, ai_util, backup, qqnt_extract, updater
 from . import sync as sync_module
 from .clipboard_util import (
     _is_animated,
@@ -841,6 +842,105 @@ class JsApi:
         self._webui.scan_cache()
         return True
 
+    # --- AI 标注建议 ---
+
+    def ai_organize(self, batch_size=None, meme_ids=None) -> dict:
+        """启动 AI 标注，返回任务 id 供轮询建议
+
+        batch_size 为空时取设置页配置的 ai_batch_size。
+        已有任务在跑时返回 started=False，前端据此提示而不是当作新任务。
+        """
+        raw = (
+            batch_size if batch_size is not None else self._cfg.get("ai_batch_size", 50)
+        )
+        try:
+            size = max(1, min(500, int(raw or 50)))
+        except (TypeError, ValueError):
+            size = 50
+        if ai_task_running():
+            running_id = running_ai_task_id()
+            return {
+                "ok": True,
+                "started": False,
+                "task_id": running_id,
+                "error": "已有标注任务正在进行",
+            }
+        task_id = start_ai_tag(self._webui, batch_size=size, meme_ids=meme_ids)
+        return {"ok": True, "started": True, "task_id": task_id}
+
+    def ai_get_progress(self) -> dict:
+        return get_ai_progress()
+
+    def ai_cancel(self, task_id=None) -> bool:
+        return cancel_ai_task(task_id)
+
+    def get_ai_suggestions(self, task_id=None) -> dict:
+        with _AI_LOCK:
+            tid = task_id or _AI_STATE.get("task_id")
+            return dict(_AI_SUGGESTIONS.get(tid, {}))
+
+    def adjust_ai_suggestion(self, task_id, meme_id, name=None, ocr=None) -> dict:
+        """调整单条建议的名称或 OCR 文字"""
+        with _AI_LOCK:
+            store = _AI_SUGGESTIONS.get(task_id)
+            if store is None or str(meme_id) not in store:
+                return {"ok": False, "error": "建议不存在"}
+            item = dict(store[str(meme_id)])
+            if name is not None:
+                item["name"] = ai_util.clean_display_name(name, item.get("name", ""))
+            if ocr is not None:
+                item["ocr"] = ai_util.clean_display_name(ocr)
+            store[str(meme_id)] = item
+            return {"ok": True, "suggestion": item}
+
+    def discard_ai_suggestions(self, task_id, meme_ids=None) -> dict:
+        """丢弃指定或全部建议"""
+        with _AI_LOCK:
+            store = _AI_SUGGESTIONS.get(task_id)
+            if store is None:
+                return {"ok": False, "error": "建议不存在"}
+            if meme_ids is None:
+                discarded = len(store)
+                _AI_SUGGESTIONS.pop(task_id, None)
+            else:
+                keys = {str(x) for x in meme_ids}
+                discarded = sum(1 for k in keys if store.pop(k, None) is not None)
+        return {"ok": True, "discarded": discarded}
+
+    def apply_ai_suggestions(self, task_id, meme_ids=None) -> dict:
+        """应用建议：写入显示名与 OCR 文字"""
+        db = get_db()
+        with _AI_LOCK:
+            items = dict(_AI_SUGGESTIONS.get(task_id, {}))
+        if meme_ids is not None:
+            wanted = {str(x) for x in meme_ids}
+            items = {k: v for k, v in items.items() if k in wanted}
+        applied = 0
+        for key, item in items.items():
+            try:
+                db.update_meme(
+                    item["id"],
+                    original_name=item.get("name", ""),
+                    ai_description=item.get("name", ""),
+                    ai_ocr_text=item.get("ocr", ""),
+                )
+                applied += 1
+            except Exception as e:
+                logger.warning("apply ai suggestion %s: %s", key, e)
+        if applied:
+            with _AI_LOCK:
+                store = _AI_SUGGESTIONS.get(task_id)
+                if store is not None:
+                    for key in items:
+                        store.pop(key, None)
+            try:
+                from .manifest import build as build_manifest
+
+                build_manifest()
+            except Exception:
+                logger.warning("rebuild manifest failed after applying AI tags")
+        return {"ok": True, "applied": applied}
+
     # 非阻塞检查更新：新鲜缓存即返，首次/过期/force 触发后台检查返回 pending
     def check_update(self, debug=False, force=False) -> dict:
         from . import __version__ as cur_ver
@@ -1448,6 +1548,373 @@ def _qqnt_worker(
         _set_qqnt(status="error", message="提取失败", error=str(e))
 
 
+# ─── AI 标注驱动（后台线程 + 状态，供主窗口轮询） ───
+
+_AI_STATE = {
+    "status": "idle",  # idle|running|done|cancelled|error
+    "progress": 0,
+    "message": "",
+    "error": "",
+    "task_id": "",
+    "total": 0,
+    "ok": 0,  # 本轮成功张数
+    "failed": 0,  # 本轮失败张数
+}
+# task_id -> {str(meme_id): {"id": int, "name": str, "ocr": str, "filename": str}}
+_AI_SUGGESTIONS = {}
+_AI_LOCK = threading.Lock()
+# 全局唯一任务槽：同一时刻只允许一个标注任务
+# 注意这与 ai_concurrency 是两个维度 —— 后者是「单个任务内并发几个 HTTP 请求」，
+# 这里是「同时存在几个任务」。多任务并行会互相覆盖 _AI_STATE、把建议散到不同
+# task_id、并把额度翻倍烧，所以必须互斥。
+_AI_TASK = {"task_id": "", "thread": None, "cancel": None}
+
+
+def _set_ai(**kw):
+    """更新 AI 状态
+
+    进度只前进不回退：并发回调到达顺序不定，直接覆盖会让前端进度条来回跳。
+    """
+    with _AI_LOCK:
+        if "progress" in kw:
+            try:
+                pct = int(kw["progress"])
+            except (TypeError, ValueError):
+                pct = 0
+            pct = max(0, min(100, pct))
+            if _AI_STATE.get("status") == "running" and kw.get("status") is None:
+                pct = max(pct, int(_AI_STATE.get("progress", 0)))
+            kw["progress"] = pct
+        _AI_STATE.update(**kw)
+
+
+def get_ai_progress() -> dict:
+    with _AI_LOCK:
+        return dict(_AI_STATE)
+
+
+def ai_task_running() -> bool:
+    """是否有标注任务正在运行（供前端与入口做互斥判断）"""
+    with _AI_LOCK:
+        if _AI_STATE.get("status") == "running":
+            return True
+        thread = _AI_TASK.get("thread")
+        return bool(thread is not None and thread.is_alive())
+
+
+def running_ai_task_id() -> str:
+    with _AI_LOCK:
+        return _AI_TASK.get("task_id", "") or ""
+
+
+def cancel_ai_task(task_id=None):
+    """请求取消标注任务
+
+    task_id 为空时取消当前任务；指定 task_id 时只有匹配才生效，
+    避免晚到的取消请求误伤新任务。
+    """
+    with _AI_LOCK:
+        cur = _AI_TASK.get("task_id", "")
+        if task_id and cur and task_id != cur:
+            logger.warning(
+                "ai tag: 取消请求的 task=%s 不是当前任务 %s，忽略", task_id, cur
+            )
+            return False
+        cancel = _AI_TASK.get("cancel")
+    if cancel is not None:
+        cancel.set()
+        return True
+    return False
+
+
+def _ai_service_config(cfg):
+    """读取并校验 AI 服务配置，返回 (base_url, api_key, model) 或 None"""
+    base_url = cfg.get("ai_base_url", "")
+    api_key = cfg.get("ai_api_key", "")
+    model = cfg.get("ai_model", "")
+    if not (base_url and api_key and model):
+        return None
+    return base_url, api_key, model
+
+
+def _ai_collect_targets(webui, meme_ids, batch_size):
+    """收集待标注表情：指定 id 优先，否则取尚未标注的前 batch_size 条
+
+    返回 (items, stats)。items 已按 file_hash 去重 —— 同图多份记录只发一次
+    请求，避免额度翻倍、也避免同一张图被 AI 起了几个不同的名字。
+    每条 item 形如 {"id", "path", "filename", "dup_ids"}，dup_ids 为同 hash
+    的其余记录 id（成功后可把结果扇出过去）。
+
+    stats 记录各环节计数，供日志说明「为什么只标了这些」。
+    """
+    db = get_db()
+    stats = {"requested": 0, "invalid": 0, "missing": 0, "dup": 0}
+    rows = []
+    if meme_ids:
+        stats["requested"] = len(meme_ids)
+        for raw_id in meme_ids:
+            try:
+                mid = int(raw_id)
+            except (TypeError, ValueError):
+                stats["invalid"] += 1
+                continue
+            row = db.get_by_id(mid)
+            if not row:
+                logger.warning("ai tag: 跳过无效 id %s", raw_id)
+                stats["invalid"] += 1
+                continue
+            rows.append(row)
+    else:
+        picked = db.search(ai_pending_only=True, offset=0, limit=batch_size)
+        stats["requested"] = len(picked)
+        rows = list(picked)
+
+    items = []
+    seen_hash = {}
+    for row in rows:
+        fname = row["filename"]
+        path = webui._find_meme_file(fname)
+        if not path:
+            logger.warning("ai tag: 跳过 %s（本地文件缺失）", fname)
+            stats["missing"] += 1
+            continue
+        fhash = (row.get("file_hash") or "").strip()
+        if fhash and fhash in seen_hash:
+            # 同内容的另一份记录：并入已有 item，不重复请求
+            seen_hash[fhash]["dup_ids"].append(row["id"])
+            stats["dup"] += 1
+            continue
+        item = {
+            "id": row["id"],
+            "path": path,
+            "filename": fname,
+            "dup_ids": [],
+        }
+        if fhash:
+            seen_hash[fhash] = item
+        items.append(item)
+    return items, stats
+
+
+def start_ai_tag(webui, batch_size=50, meme_ids=None) -> str:
+    """启动标注任务，返回 task_id
+
+    全局互斥：若已有任务在跑则拒绝启动，返回正在运行的那个 task_id，
+    由调用方通过 ai_task_running() 区分「本次是否真的启动成功」。
+    """
+    with _AI_LOCK:
+        thread = _AI_TASK.get("thread")
+        if thread is not None and thread.is_alive():
+            cur = _AI_TASK.get("task_id", "")
+            logger.warning("ai tag: 已有任务在运行 task=%s，拒绝重复启动", cur)
+            return cur
+        task_id = uuid.uuid4().hex
+        cancel = threading.Event()
+        _AI_TASK["task_id"] = task_id
+        _AI_TASK["cancel"] = cancel
+        worker = threading.Thread(
+            target=_ai_tag_worker,
+            args=(webui, task_id, meme_ids, batch_size, cancel),
+            daemon=True,
+        )
+        _AI_TASK["thread"] = worker
+    _set_ai(
+        status="running",
+        progress=0,
+        message="准备中",
+        error="",
+        task_id=task_id,
+        total=0,
+        ok=0,
+        failed=0,
+    )
+    worker.start()
+    return task_id
+
+
+def _merge_dup_suggestions(store, targets, results):
+    """把结果扇出到同 hash 的重复记录上，保证同图标注一致
+
+    store: 本次任务的建议字典（就地修改）
+    返回新增的条目数（不含主记录）。
+    """
+    by_id = {t["id"]: t for t in targets}
+    added = 0
+    for r in results:
+        src = by_id.get(r["id"])
+        if not src:
+            continue
+        for dup_id in src.get("dup_ids", []):
+            store[str(dup_id)] = {
+                "id": dup_id,
+                "name": r["name"],
+                "ocr": r.get("ocr", ""),
+                "filename": "",
+            }
+            added += 1
+    return added
+
+
+def _ai_tag_worker(webui, task_id, meme_ids, batch_size, cancel):
+    cfg = get_config()
+    service = _ai_service_config(cfg)
+    if not service:
+        logger.warning("ai tag: 未配置 AI 服务，任务中止")
+        _set_ai(status="error", message="请先在设置页配置 AI 服务与模型")
+        return
+    base_url, api_key, model = service
+    scope = (
+        "选中 %d 张" % len(meme_ids)
+        if meme_ids
+        else "未标注（最多 %d 张）" % batch_size
+    )
+    logger.info("ai tag: 任务开始 task=%s scope=%s model=%s", task_id, scope, model)
+
+    targets, cstats = _ai_collect_targets(webui, meme_ids, batch_size)
+    if cstats["invalid"] or cstats["missing"] or cstats["dup"]:
+        logger.info(
+            "ai tag: 候选 %d 张 → 无效 %d / 原图缺失 %d / 同图去重 %d → 实发 %d 次请求",
+            cstats["requested"],
+            cstats["invalid"],
+            cstats["missing"],
+            cstats["dup"],
+            len(targets),
+        )
+    if not targets:
+        logger.info("ai tag: 没有需要标注的表情，任务结束")
+        _set_ai(status="done", progress=100, message="没有需要标注的表情", total=0)
+        return
+    _set_ai(
+        total=len(targets),
+        message="开始标注 %d 张" % len(targets),
+    )
+
+    counter = [0]
+    counter_lock = threading.Lock()
+    breaker = ai_util.CircuitBreaker()
+    broken = {"reason": ""}
+
+    def on_progress(done, total):
+        with counter_lock:
+            counter[0] = max(counter[0], done)
+            cur = counter[0]
+        pct = int(cur * 100 / total) if total else 0
+        _set_ai(progress=pct, message="标注中 %d/%d" % (cur, total))
+
+    def on_breaker(reason):
+        """熔断：记录原因并终止本任务，已成功的建议仍然保留"""
+        broken["reason"] = reason
+        logger.error("ai tag: 触发熔断，中止余下请求 —— %s", reason)
+
+    def on_result(item):
+        """每条标注完成即打印一行终端日志，便于实时观察进度"""
+        mid = item.get("id")
+        with counter_lock:
+            idx = counter[0]
+        name = file_map.get(mid, "")
+        shown = "%s(%s)" % (mid, name) if name else str(mid)
+        err = item.get("error")
+        if err:
+            logger.warning(
+                "ai tag: [%d/%d] #%s 失败: %s", idx, len(targets), shown, err
+            )
+            return
+        logger.info(
+            "ai tag: [%d/%d] #%s -> %s | ocr=%s",
+            idx,
+            len(targets),
+            shown,
+            item.get("name", ""),
+            item.get("ocr", "") or "-",
+        )
+
+    file_map = {t["id"]: t.get("filename", "") for t in targets}
+
+    try:
+        results = ai_util.ai_tag_memes(
+            base_url,
+            api_key,
+            model,
+            targets,
+            on_progress=on_progress,
+            on_result=on_result,
+            on_breaker=on_breaker,
+            breaker=breaker,
+            should_stop=lambda: cancel.is_set(),
+            style=cfg.get("ai_organize_style", "general"),
+            concurrency=cfg.get("ai_concurrency", 4),
+        )
+    except Exception as e:
+        logger.error("ai tag error: %s", e)
+        _set_ai(status="error", message="标注失败", error=str(e))
+        return
+    finally:
+        # 任务结束即释放任务槽，下一次启动才有入口
+        with _AI_LOCK:
+            if _AI_TASK.get("task_id") == task_id:
+                _AI_TASK["task_id"] = ""
+                _AI_TASK["cancel"] = None
+
+    # 带上 filename 便于前端直接拼缩略图地址，避免再查一次库
+    with _AI_LOCK:
+        store = {
+            str(r["id"]): {
+                "id": r["id"],
+                "name": r["name"],
+                "ocr": r.get("ocr", ""),
+                "filename": file_map.get(r["id"], ""),
+            }
+            for r in results
+        }
+    dup_added = _merge_dup_suggestions(store, targets, results)
+    if dup_added:
+        logger.info("ai tag: 同图结果扇出，额外补全 %d 条重复记录", dup_added)
+    with _AI_LOCK:
+        _AI_SUGGESTIONS[task_id] = store
+
+    stats = breaker.stats
+    total_suggestions = len(store)
+    if cancel.is_set():
+        logger.info("ai tag: 已取消，保留 %d 条建议", total_suggestions)
+        _set_ai(
+            status="cancelled",
+            progress=100,
+            ok=stats["ok"],
+            failed=stats["tried"] - stats["ok"],
+            message="已取消，保留 %d 条建议" % total_suggestions,
+        )
+    elif broken["reason"]:
+        failed = stats["tried"] - stats["ok"]
+        logger.warning(
+            "ai tag: 熔断中止，成功 %d 张失败 %d 张，%d 张未尝试",
+            stats["ok"],
+            failed,
+            len(targets) - stats["tried"],
+        )
+        _set_ai(
+            status="error",
+            progress=100,
+            ok=stats["ok"],
+            failed=failed,
+            message="已中止，保留 %d 条建议" % total_suggestions,
+            error="%s。已成功 %d 张，保留建议可正常应用；"
+            "请到设置页检查 API 配置后重试。" % (broken["reason"], stats["ok"]),
+        )
+    else:
+        failed = stats["tried"] - stats["ok"]
+        if failed:
+            logger.warning("ai tag: 完成，成功 %d 张，失败 %d 张", stats["ok"], failed)
+        else:
+            logger.info("ai tag: 完成，成功 %d 张", stats["ok"])
+        _set_ai(
+            status="done",
+            progress=100,
+            ok=stats["ok"],
+            failed=failed,
+            message="已生成 %d 条建议，请确认后应用" % total_suggestions,
+        )
+
+
 # ─── 存储位置迁移进度（后台线程 + 轮询） ───
 _STORAGE_MIGRATE_STATE = {
     "status": "idle",  # idle|running|done|error|cancelled
@@ -1874,6 +2341,13 @@ class SettingsApi:
             "cache_dir": str(self._cfg.cache_dir),
             "lan_port": d.get("lan_port", 17852),
             "lan_secret": d.get("lan_secret", ""),
+            "ai_base_url": d.get("ai_base_url", ""),
+            "ai_api_key": d.get("ai_api_key", ""),
+            "ai_model": d.get("ai_model", ""),
+            "ai_organize_style": d.get("ai_organize_style", "general"),
+            "ai_batch_size": int(d.get("ai_batch_size", 50) or 50),
+            "ai_concurrency": int(d.get("ai_concurrency", 4) or 4),
+            "ai_auto_tag_on_import": d.get("ai_auto_tag_on_import", False),
             "auto_start": is_auto_start_enabled(),
             "silent_start": d.get("silent_start", False),
             "sync_auto_fetch_index": d.get("sync_auto_fetch_index", False),
@@ -1909,7 +2383,6 @@ class SettingsApi:
             "show_uncategorized": d.get("show_uncategorized", True),
             "record_recent_use": d.get("record_recent_use", True),
             "show_startup_animation": d.get("show_startup_animation", True),
-            "tg_tdata_path": d.get("tg_tdata_path", ""),
             "hover_to_play": d.get("hover_to_play", False),
         }
 
@@ -2005,7 +2478,6 @@ class SettingsApi:
             "show_download_done": True,
             "record_recent_use": True,
             "show_startup_animation": True,
-            "tg_tdata_path": self._cfg.get("tg_tdata_path", ""),
             "hover_to_play": self._cfg.get("hover_to_play", False),
         }
 
@@ -2122,38 +2594,6 @@ class SettingsApi:
 
     def cancel_qq_import(self):
         adb_util.cancel_qq_import()
-
-    def pick_tg_tdata(self) -> dict:
-        """手动选择 Telegram Desktop tdata 目录（校验并持久化）"""
-        result = self._dialog(webview.FileDialog.FOLDER)
-        if not result:
-            return {"ok": False, "cancelled": True}
-        path = result[0] if isinstance(result, (tuple, list)) else result
-        if not tg_stickers.is_valid_tdata(path):
-            return {
-                "ok": False,
-                "error": "所选目录不是有效的 tdata 目录（未找到 key_datas）",
-            }
-        self._cfg.set("tg_tdata_path", path)
-        self._cfg.save()
-        return {"ok": True, "path": path}
-
-    def start_tg_import(self, tdata_path=None, passcode="", convert_webm=True) -> dict:
-        """启动 Telegram 缓存导入，已有任务时返回 {"ok": False, "error"}"""
-        if not tdata_path:
-            tdata_path = self._cfg.get("tg_tdata_path", "") or None
-        started = tg_stickers.start_tg_import(
-            self._webui, tdata_path, passcode, convert_webm
-        )
-        if not started:
-            return {"ok": False, "error": "已有导入任务正在进行"}
-        return {"ok": True}
-
-    def get_tg_import_progress(self) -> dict:
-        return tg_stickers.get_tg_progress()
-
-    def cancel_tg_import(self):
-        tg_stickers.cancel_tg_import()
 
     def start_douyin_import(self, cookie: str) -> dict:
         """启动抖音表情包下载导入（全部下载）"""
@@ -2487,6 +2927,78 @@ class SettingsApi:
             return True
         except Exception:
             return False
+
+    # --- AI 标注 ---
+
+    def ai_list_models(self, base_url: str = "", api_key: str = "") -> dict:
+        """拉取可用模型列表，视觉模型排在前面"""
+        cfg = self._cfg
+        base_url = base_url or cfg.get("ai_base_url", "")
+        api_key = api_key or cfg.get("ai_api_key", "")
+        try:
+            models = ai_util.list_models(base_url, api_key)
+        except Exception as e:
+            return {"ok": False, "error": str(e), "models": []}
+        return {"ok": True, "models": models}
+
+    def ai_test_connection(self, base_url: str = "", api_key: str = "") -> dict:
+        """测试连通性：仅拉取模型列表，不发起对话请求，不消耗额度"""
+        result = self.ai_list_models(base_url, api_key)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error", "连接失败")}
+        count = len(result.get("models", []))
+        vision = sum(1 for m in result["models"] if m.get("vision"))
+        return {
+            "ok": True,
+            "message": "连接成功，%d 个模型（%d 个疑似多模态）" % (count, vision),
+        }
+
+    def ai_save_config(self, options: dict) -> bool:
+        """保存 AI 配置。密钥留空表示保持原值，避免被清空"""
+        if not isinstance(options, dict):
+            return False
+        cfg = self._cfg
+        if "ai_base_url" in options:
+            cfg.set("ai_base_url", str(options["ai_base_url"] or "").strip())
+        # 密钥留空表示不修改，避免把已保存的密钥清掉
+        if options.get("ai_api_key"):
+            cfg.set("ai_api_key", str(options["ai_api_key"]).strip())
+        if "ai_model" in options:
+            cfg.set("ai_model", str(options["ai_model"] or "").strip())
+        if "ai_organize_style" in options:
+            cfg.set("ai_organize_style", options["ai_organize_style"] or "general")
+        if "ai_batch_size" in options:
+            cfg.set(
+                "ai_batch_size", max(1, min(500, int(options["ai_batch_size"] or 50)))
+            )
+        if "ai_concurrency" in options:
+            cfg.set(
+                "ai_concurrency", max(1, min(8, int(options["ai_concurrency"] or 4)))
+            )
+        if "ai_auto_tag_on_import" in options:
+            cfg.set("ai_auto_tag_on_import", bool(options["ai_auto_tag_on_import"]))
+        cfg.save()
+        return True
+
+    def ai_start(self, batch_size: int = 50) -> dict:
+        """从设置页启动 AI 标注"""
+        if ai_task_running():
+            return {
+                "ok": True,
+                "started": False,
+                "task_id": running_ai_task_id(),
+                "error": "已有标注任务正在进行，请先等它结束或在主窗口取消",
+            }
+        task_id = start_ai_tag(
+            self._webui, batch_size=max(1, min(500, int(batch_size or 50)))
+        )
+        return {"ok": True, "started": True, "task_id": task_id}
+
+    def ai_get_progress(self) -> dict:
+        return get_ai_progress()
+
+    def ai_cancel(self, task_id=None) -> bool:
+        return cancel_ai_task(task_id)
 
     def import_memes(self) -> dict:
         result = self._dialog(
@@ -3573,6 +4085,18 @@ class WebUI:
                 break  # 取消：progress_cb 返回 False 时中断导入
         if imported:
             build_manifest()
+        # 导入后自动 AI 标注：后台执行，不阻塞导入返回
+        cfg = self._cfg or get_config()
+        if imported_ids and cfg and cfg.get("ai_auto_tag_on_import", False):
+            if not _ai_service_config(cfg):
+                logger.warning("已开启导入后自动标注但未配置 AI 服务，本次跳过")
+            elif ai_task_running():
+                # 已有任务在跑，不抢占：这批新图留给下一轮增量
+                logger.warning(
+                    "已有标注任务在运行，导入后自动标注本次跳过（新图仍处于未标注状态）"
+                )
+            else:
+                start_ai_tag(self, batch_size=50, meme_ids=imported_ids)
         logger.info(f"导入完成: {imported} 个")
         return {"ids": imported_ids, "rejected": rejected, "skipped_dup": skipped_dup}
 

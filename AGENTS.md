@@ -49,6 +49,7 @@ src/              # 主代码
   updater.py      # 版本检查 + 并发镜像下载
   database.py     # MemeDB (SQLite, 6 表)
   config.py       # Config (JSON + Fernet 加密密钥)
+  ai_util.py     # AI 自动标注（模型列表 / 多模态对话 / 错误分类+退避重试 / 熔断 / 并发批量标注，纯 urllib）
   sync.py         # 同步后端 (FTP/S3/R2/WebDAV)
   lan.py          # 局域网互联 (UDP 发现 + TCP 握手 + AES-GCM 会话)
   tray.py         # TrayManager (pystray, 惰性导入)
@@ -61,7 +62,6 @@ src/              # 主代码
   platform_util.py # 平台工具 (WSL检测, 开机自启, 单实例互斥)
   adb_util.py      # ADB 自动检测/下载 + QQ 表情包缓存导入（ADB 拉取 + 魔数识别扩展名 + ZIP 打包）
   qqnt_extract.py  # QQNT 本地收藏表情提取（GPL-3.0 衍生模块，纯函数 + 回调接口，无 UI 依赖）
-  tg_stickers.py   # Telegram Desktop 缓存表情包提取（tdata 解密 + webm 转 webp + 入库）
   douyin.py        # 抖音表情包下载导入（ABogus 签名 + curl_cffi TLS 指纹 + WebP 原格式入库）
   abogus.py        # ABogus 签名算法（纯 Python，GPL-3.0，源自 TikTokDownloader）
   backup.py        # 本地备份（ZIP 导出/恢复，仅 PC 间整库迁移，仅允许恢复到空库）
@@ -77,7 +77,8 @@ src/              # 主代码
     utils/       # api 桥接 + esc + renderMarkdown
     composables/ # useMemes 状态 / useDragSort 拖拽 / useContextMenu / useCollectionBuilder
     components/  # Pager/TagEditor/ImportMenu/ImportProgressOverlay/SyncOverlay/
-                 # ContextMenu/CollectionBuilder/CollectionTreeNode/UpdateDialog/SimilarImportDialog
+                 # ContextMenu/CollectionBuilder/CollectionTreeNode/UpdateDialog/
+                 # SimilarImportDialog/AiSuggestionPanel
   webui/          # 前端静态文件
     vue.html      # 主窗口入口（Vue），Bottle 优先加载
     dist/ohmymeme.js # Vite 构建产物（gitignored）
@@ -97,7 +98,6 @@ tests/
   test_core.py    # unittest 风格: Version/Config/Crypto/Database
   test_abogus.py  # unittest 风格: ABogus 签名算法 SM3/RC4/签名
   test_douyin_dl.py # unittest 风格: 抖音下载 CLI (签名URL/verifyFp)
-  test_tg_stickers.py # unittest 风格: Telegram webm转换/取消/进度/dedup (mock Popen)
   test_updater.py   # unittest 风格: 非阻塞版本检查缓存机制 (mock check_latest)
   test_startup.py # pytest 风格: 全生命周期集成测试
   test_phash.py   # pytest 风格: 感知哈希(pHash)算法单元测试 (需 PIL)
@@ -146,6 +146,8 @@ tests/
 - `MemeDB.add_tags_to_memes(meme_ids, tags)`: 批量合并追加标签（get-or-create + `INSERT OR IGNORE`，不清空各表情已有标签），返回实际存在的表情数；先过滤出实际存在的 meme id（外键开启时对缺失 id 写 `meme_tags` 会整批失败），批量写包 try/rollback/re-raise；供 JsApi `batch_add_tags` 使用
 - `MemeDB.add_memes_to_collection(meme_ids, collection_id)` / `MemeDB.move_memes_to_collection(meme_ids, from_ids, to_id)`: 批量加组/移动的单事务实现（先校验表情 id 与目标分组存在，写入失败 rollback 后抛出）；按 `INSERT OR IGNORE` 实际新增关联计数（重复加入目标不计）；move 仅纳入实际属于 `from_ids` 子树的成员（非成员不受删除或移动影响），从子树删除后再加入目标，提交前级联清理源子树内变空的分组（迭代删除无成员且无子分组的叶子空组直到不动点，支持子组先空父组后空；仅限 from_ids 范围，子树外空分组保留；两处 FK 均 ON DELETE CASCADE，故只删叶子防波及）；供 JsApi `batch_add_to_collection`/`batch_move_to_collection` 使用（JsApi 负责目标解析/创建与「不能移入源分组自身或其子分组」校验——`create_collection` 会复用同名顶层分组，故该校验在目标解析后统一执行；move 成功后无条件重建 manifest——`moved==0` 时成员关系仍可能变化，如成员已在目标、仅从源移除）
 - `memes.sort_order`: 自定义排序（拖拽更新），默认 0，查询 `ORDER BY sort_order ASC, updated_at DESC`
+- `memes.ai_description` / `memes.ai_ocr_text`: AI 自动标注结果（显示名 / 图上文字），`TEXT NOT NULL DEFAULT ''`，经 `_migrate()` 追加（幂等 try/except）；均在 `_UPDATABLE_FIELDS` 内，走 `update_meme()` 写入
+- `MemeDB.search()`/`count()` 的 `ai_pending_only=True`：条件 `ai_description='' AND ai_ocr_text=''`，**AI 标注只挑未标注过的**（重跑不重复计费）；keyword 检索额外匹配 `ai_ocr_text`（搜图上的文字）
 - `collections.parent_id`: 多级分组支持（最多 3 层），`NULL` 为顶层分组
 - `meme_collections.sort_order`: 分组内成员自定义排序
 - `recent_uses`: `meme_id` + `used_at`，复制时 `INSERT OR REPLACE`，按 `used_at DESC` 取最近使用
@@ -237,7 +239,7 @@ tests/
 - **感知哈希相似去重**（`download_original_image` 单图导入路径）：`memes.perceptual_hash` 列（TEXT 存 16 进制，旧库自动 ALTER 迁移）持久化每张图的 64 位感知哈希（`_perceptual_hash`，8x8 可分离 DCT pHash，比均值哈希对浅色/低信息图判别力更强）。导入时哈希未命中则 `_find_similar_candidates` **只算新图 phash + 从 DB 读存量 phash 比对**（整数 XOR，微秒级），`perceptual_hash` 为空的旧库行惰性回填：缺失 ≤`_PHASH_SYNC_BACKFILL_MAX`(5) 同步回填，超过则丢后台线程（`_PHASH_BACKFILLING` 防重入，start 异常复位），本次只比对已填的。`_build_cache_index` 一次性构建文件索引避免逐行 walk（仅在有缺失时执行）。汉明距离 `_PHASH_SIMILAR_DIST<=12` 视为近似，**全库比对无截断漏检**。命中候选时将文件复制到独立临时文件登记 `_PENDING_SIMILAR`（token 随机、TTL 300s 过期时在 pop/next-register 时删除临时文件），返回 `similar_pending`，前端 `SimilarImportDialog` 弹窗让用户选：保留新图 / 保留旧图 / 跳过（discard）/ 都保留（keep_both），经 `JsApi.resolve_similar_import(token, action)` 决定导入或放弃。哈希精确命中返回 `duplicate` 提示「已存在」。`_do_import`/`scan_cache` 新建时写入 `perceptual_hash`（`add_meme` 内部转 hex，规避 64 位溢出 SQLite INTEGER）。两条单图交互路径都启用：`download_original_image`（URL 拖放/下载原图）与 `/api/upload/`（File 拖放，单张时走 `_import_with_similar_decision`）；批量路径（多文件拖放/文件夹/同步 pull/LAN）不做感知去重（多文件走 `_do_import` 避免逐个打断）。`_do_import` 去重关键区（`get_by_hash`检查→copy2→`add_meme`→回查）由模块级 `_IMPORT_LOCK` 串行化：并发拖入完全相同字节的图也不产生重复记录（测试 `test_import_concurrency.py`）
 - **导入限制**：`config.py` 常量 `_IMPORT_MAX_PX=2560`（最长边）/`_IMPORT_MAX_BYTES=20MiB`，超过即拒绝接收；覆盖 `_do_import`、`scan_cache`、同步 `_pull_worker`、LAN `_import_bytes` 四类接收路径，跳过超限文件并计数（前端 toast 提示）
 - **文件夹导入** (`JsApi.import_folder`)：FOLDER 对话框 → `os.walk` 递归收集图片（扩展名过滤）→ **后台线程导入**（`start_import_job` + `_IMPORT_JOB_STATE`，前端 `ImportProgressOverlay` 300ms 轮询进度条 + 取消，取消时 `progress_cb` 返回 False 中断 `_do_import`，保留实际进度）→ `make_collection`（前端导入菜单「自动创建分组」勾选，默认开）时以文件夹名 `create_collection` + 批量 `add_to_collection`（同名分组复用，重复导入并入）。`import_memes`（文件对话框）同样后台化，走同一 job；`import_from_clipboard`（剪贴板，通常单张瞬时）保持同步返回 id。`_do_import` 提供可选 `progress_cb`（逐文件回调，返回 False 中断）
-- **渠道自动分组**：3 个入库渠道导入后调 `WebUI.ensure_import_collection(ids, 固定名)` 自动归入固定名分组——TG→「Telegram」、抖音→「抖音」、微信→「微信」；同一渠道不同时间导入复用同名分组。QQ（导出 ZIP 到外部）、QQNT（提取到输出文件夹）不入库故不建组。`create_collection` 现为「先按 name+parent_id 查已存在→返回既有 id，否则 INSERT」——**不再产生重复空分组**（仓库同名字段多次导入只一个分组，成员靠 meme_collections 的 PRIMARY KEY 去重），测试 `test_ensure_collection_same_name_reused`/`empty_args`
+- **渠道自动分组**：2 个入库渠道导入后调 `WebUI.ensure_import_collection(ids, 固定名)` 自动归入固定名分组——抖音→「抖音」、微信→「微信」；同一渠道不同时间导入复用同名分组。QQ（导出 ZIP 到外部）、QQNT（提取到输出文件夹）不入库故不建组。`create_collection` 现为「先按 name+parent_id 查已存在→返回既有 id，否则 INSERT」——**不再产生重复空分组**（仓库同名字段多次导入只一个分组，成员靠 meme_collections 的 PRIMARY KEY 去重），测试 `test_ensure_collection_same_name_reused`/`empty_args`
 
 ### 本地备份与恢复 (backup.py)
 - **定位**: 仅 PC 间整库迁移（导出 ZIP → 拷贝 → 恢复），手动触发，不做增量/自动清理/加密包；不碰手机 LAN 端
@@ -280,6 +282,7 @@ tests/
 ### Manifest
 - `build()` 递归遍历嵌套分组树，空分组自动 `delete_collection`
 - 远端 manifest 中的 `collections` 以嵌套格式存储（`name`/`filenames`/`children`），version 2 旧格式启动时自动转换
+- 每条 meme 额外带 `ai_description` / `ai_ocr_text`（版本号仍为 3，读取侧一律 `.get()` 兼容旧清单）。**下载侧的合并规则：`sync._merge_remote_ai()` 只在「远端有值且本地为空」时写入，绝不覆盖本地已有标注**，三条路径都覆盖：文件一致跳过下载、本地已有记录重下载、全新入库
 
 ### 自定义排序
 - `memes.sort_order` 字段存储全局展示顺序；前端可拖拽排序仅在正 ID 分组/子分组内进行，成员顺序存 `meme_collections.sort_order`
@@ -353,20 +356,10 @@ tests/
 - **入口**: `extract_qq_emojis(qq_number, output_dir, ...)`（新增 `image_only`/`overwrite`/`should_stop`）；环境探测 `get_extract_status()` 区分 `config`/`path_missing`/空账号三态；辅助 `get_available_qq_numbers()`/`get_default_output_dir()`
 - **GUI 集成**: `webui.py` 的 `_QQNT_STATE`/`_qqnt_worker` 后台驱动 + `SettingsApi.qqnt_*` 方法（`qqnt_check_env`/`qqnt_pick_ini`/`qqnt_pick_userdata`/`qqnt_pick_base`/`qqnt_start`/`qqnt_get_progress`/`qqnt_cancel`/`qqnt_open_dir`）；设置页「电脑版 QQ（QQNT）」`.import-row` 点击开向导（环境/选账号 → 输出位置 → 进度 → 汇总），300ms 轮询 `qqnt_get_progress`；手动选择的 INI/用户数据目录持久化到 `config.json` 的 `qqnt_ini_path`/`qqnt_userdata_path`；`should_stop` 实现取消。**手动重定向始终可见**：`qqntRenderEnv` 在探测成功时也显示「选择配置文件/选择用户数据目录」按钮（`userdata_save_path` 传入时完全覆盖 INI 推导路径），应对多用户 Windows 下 `UserDataInfo.ini` 只记录第一个用户路径的场景
 
-### Telegram 缓存导入 (tg_stickers.py)
-- **入口**: `start_tg_import(webui, tdata_path, passcode, convert_webm)` — 后台线程执行完整流程；`tdata_path` 为空时回退到配置 `tg_tdata_path`，再自动检测
-- **tdata 路径检测** (`find_tdata_path`): 跨平台回退链 — Windows `%APPDATA%\Telegram Desktop\tdata` → macOS `~/Library/Application Support/Telegram Desktop/tdata` → Linux `~/.local/share/TelegramDesktop/tdata` + Snap/Flatpak 变体；未找到则报 `error_code="no_tdata"` 引导手动指定
-- **手动指定目录**: 设置页「手动指定 tdata 目录」按钮（`SettingsApi.pick_tg_tdata`）弹文件夹对话框，`is_valid_tdata()` 校验含 `key_datas`/`key_data`，通过后持久化到 config 键 `tg_tdata_path`（下次启动预填显示）；导入失败弹窗内 `error_code` 为 `no_tdata`/`invalid_tdata`/`no_cache` 时显示「手动选择 tdata 目录」重试按钮
-- **解密机制**: Telegram Desktop 缓存使用 AES-IGE（TDF$ 文件）和 AES-CTR（TDEF 文件）加密，本地密钥从 `tdata/key_datas` 读取，通过 PBKDF2-HMAC-SHA512 派生（有本地密码时 100k 迭代，无密码时 1 次）；`bad_key` 错误提示本地密码场景
-- **解密流程**: `read_local_key()` 读取密钥 → 遍历 `user_data/cache` + `user_data/media_cache` → `decrypt_tdf_file()`/`decrypt_tdef_file()` 按魔数识别格式解密 → `detect_extension()` 通过文件头识别扩展名 → 仅保留 webp/webm
-- **webm 转换** (`convert_webm_to_webp`): 默认开启，ffmpeg 将 webm 转 animated webp，**有损 q80**（`-lossless 0 -quality 80`，无损编码实测 11-35s/个过慢改用有损，贴纸场景质量几乎无损），`-loop 1` 循环播放，保持宽高比（最长边 512，不放大），删除原 webm；转换前 `_check_ffmpeg()` 预检，缺失时报 `error_code="no_ffmpeg"` 中止；**单个转换失败的文件跳过不导入**（`convert_failed` 计数并在完成消息提示）。**并行转换**：`_tg_worker` 内用 `ThreadPoolExecutor(max_workers=min(os.cpu_count(), 4))` 受控并发，实测单张 ~1.7s → 4 路约 2.9x 加速（千张 30 分 → ~11 分）；进度 `done/convert_failed` 在 `_TG_LOCK` 内原子累加，非 webm（webp）直接透传并计入进度；进度条按 `done/total`（total=全部待处理含 webp）平滑递增。**取消/回收**：`convert_webm_to_webp` 用 `Popen`+有界 `communicate(timeout)`，受 `_TG_ACTIVE_PROC` 集合（`_TG_LOCK` 保护）跟踪活动进程；`cancel_tg_import()` / `_reset_state()` 对所有运行中进程 `terminate()`；`_reap_proc()` 统一回收——kill 后无条件 `wait`（纠 zombie），wait 超时二次 SIGKILL 兜底，**仅进程实际退出（`poll()` 非 None）才从 `_TG_ACTIVE_PROC` 移除**；转换循环 `finally` 用 `executor.shutdown(wait=True, cancel_futures=True)` 等待已启动 future 退出，避免与 temp_dir 清理/下次导入交错。**ETA 用 `time.monotonic()`**（`_TG_T0` 起点与计算同单调时钟）。**防双 worker**：`start_tg_import` 在 `_TG_LOCK` 内检查后立即 `_update_tg(status="scanning")` 占位运行态，线程在锁外创建，并发第二次调用在锁内见 scanning 即返回 False
-- **静态版去重** (`dedup_static_against_animated`): Telegram 对同一动态贴纸缓存两份（512 webm 动画 + 320 webp 静态版），入库前用 PIL 识别动画 webp（`n_frames>1`），将每个静态 webp 与所有动画 webp 首帧做**归一化灰度差分**（白底合成 32×32，阈值 diff<0.02，实测匹配组 0.002-0.005 / 非匹配组 >0.1 间隔安全），内容一致的静态版跳过只保留动画版；无动画或 PIL 缺失时原样返回；`.webm` 文件（未转换时）不受影响。实测 127 静态中 45 个被判重跳过，0 误杀 0 漏跳，全量比较耗时 ~2s
-- **进度状态** (`_TG_STATE`): `idle` → `scanning` → `loading_key` → `decrypting` → `converting` → `importing` → `done`/`error`/`cancelled`，含 `error_code` 字段，前端 300ms 轮询 `get_tg_import_progress()`。**ETA 展示**：`_TG_STATE["elapsed_s"]` 由 worker 起点 `_TG_T0` 计算，`_refresh_tg_elapsed()` 在 `_update_tg`/`get_tg_progress` 内按运行中状态推进（idle/结束不推进）；前端 `settings.js` 的 `updateTgEta()` 据 `elapsed_s` + `progress` 线性外推「已用 X · 预计剩余 Y」（`formatDuration()` 折算分钟/秒），`tg-import-eta` 元素随轮询刷新、overlay 打开时清空
-- **入库**: 解密到临时目录后调 `webui._do_import()` 入库，完成后自动清理临时文件
-- **取消**: `cancel_tg_import()` 设置标志位，工作线程在每个阶段检查并中止
-- **前端 UI**: 设置页「导入」分组下 `.import-row` 列表行（硬编码 SVG 图标 + 名称），点击对应行弹出该软件的导入对话框（Telegram：tdata 目录手动指定 + 本地密码 + WebM 转换开关 → 进度覆盖层，错误时 `no_tdata`/`invalid_tdata`/`no_cache` 显示「手动选择 tdata 目录」重试按钮）
-- **多账号**: Telegram Desktop 多账号共享 `user_data/cache`，无法区分来源账号，统一提取
-- **透明动画（已解决）**: Telegram 视频贴纸 webm 内含有效 VP9+alpha（`yuva420p`）数据，但 ffmpeg **原生 VP9 解码器会静默丢弃 alpha 平面**（解码结果全不透明），导致转换出的动画 webp 背景不透明。修复：`convert_webm_to_webp` 在 `-i` 前加 `-c:v libvpx-vp9` 强制使用 libvpx 解码器保留 alpha。实测 48 个 webm 中 47 个恢复透明，透明像素分布与同表情静态 webp 完全一致
+### 已移除：Telegram 缓存导入
+- 2026-09-25 移除 `src/tg_stickers.py` 与 `tests/test_tg_stickers.py`。原因：解密依赖 `tgcrypto` 仅源码分发、无 Windows 预编译轮子，需 MSVC Build Tools，安装门槛高于其功能价值
+- 同步移除：设置页 Telegram 导入入口与对话框；`SettingsApi` 的 `pick_tg_tdata`/`start_tg_import`/`get_tg_import_progress`/`cancel_tg_import`；配置键 `tg_tdata_path`；`requirements.txt` 的 `tgcrypto`
+- 需要恢复时从 git 历史取回：`git log --diff-filter=D -- src/tg_stickers.py`
 
 ### 抖音表情包导入 (douyin.py + abogus.py)
 - **架构**: 纯协议驱动（无浏览器自动化），`src/abogus.py` 提供 ABogus 签名算法绕过抖音 WAF，`curl_cffi` 模拟 Chrome 124 TLS 指纹绕过 JA3/JA4 检测
@@ -401,6 +394,35 @@ tests/
 - **完整性校验**: **仅发布态（`sys.frozen`）比对固定哈希**——源码运行用的是本地自编译产物，其哈希与随包固定值必然不同（MSVC 构建非确定性），且该哈希描述的是打包件而非工作副本，故开发态跳过比对（否则开发者自行编译后反而无法使用微信导入）；发布态哈希不匹配或未配置时**拒绝执行**（`ensure_wechat_keyfinder` 返回空串，前端报 `no_binary`）。哈希由构建期自动注入，无需手工 `certutil`（见上「SHA-256 构建期注入」）
 - **源码运行按需构建** (`_ensure_dev_helper`): 开发态缺 helper 时自动 `cmake` 构建一次并拷回源码目录（与 `main._ensure_vue_frontend` 同思路），保证新克隆仓库执行 `python -m src` 即可用微信导入；**pytest 下跳过**（沿用 `hotkey.py` 的 `PYTEST_CURRENT_TEST` 守卫），构建失败仅告警不阻断启动
 - **前端 UI**: 设置页「导入」分组下 `.import-row` 列表行（硬编码 SVG 图标 + 名称），点击微信行弹出对话框（目录选择 + 环境检测 + 多账号下拉 → 进度覆盖层）
+
+### AI 自动标注 (ai_util.py + webui.py 的 `_AI_*` 一组)
+- **目标与边界**：为现有表情自动生成显示名（`标签-内容描述`）与图上文字；只调用 OpenAI 兼容的 `/v1/models` 与 `/v1/chat/completions`，**纯标准库 `urllib`**，不引任何 SDK
+- **不要跳过建议环节**：AI 结果先进内存字典 `_AI_SUGGESTIONS[task_id]`（`{str(meme_id): {"id","name","ocr","filename"}}`），只有 `apply_ai_suggestions` 才写库（`update_meme(original_name/ai_description/ai_ocr_text)` + `build_manifest()`）。AI 输出不可信——直接落库会污染整个图库
+- **三条 JsonApi**：`JsApi.ai_organize(batch_size=None, meme_ids=None)`（batch_size 为空时取配置 `ai_batch_size`；**已有任务时返回 `started=False` 而不是抛错**）/ `ai_get_progress` / `ai_cancel(task_id=None)`；建议相关 `get_ai_suggestions(task_id)`、`adjust_ai_suggestion(task_id, meme_id, name, ocr)`、`discard_ai_suggestions(task_id, meme_ids)`、`apply_ai_suggestions(task_id, meme_ids)`；`SettingsApi` 侧另有 `ai_list_models` / `ai_test_connection`（**只拉模型列表，不消耗额度**）/ `ai_save_config` / `ai_start`（同样返回 `started` 语义）
+- **后台任务统一范式**：`start_ai_tag()` 起 daemon 线程跑 `_ai_tag_worker`，`_AI_STATE`（status/progress/message/error/task_id/total/ok/failed）由 `_AI_LOCK` 保护，前端 400ms 轮询。取消与熔断都通过**每任务的 `threading.Event`** 收敛：`_ai_tag_worker` 把 `lambda: cancel.is_set()` 当 `should_stop` 传下去，配合 `breaker.tripped` 在 `pool.map` 循环里提前 `break`
+- **全局任务互斥（同一时刻只允许一个标注任务）**：模块级 `_AI_TASK = {"task_id", "thread", "cancel"}` 是唯一任务槽（`_AI_LOCK` 保护）。`start_ai_tag()` 在锁内检查 `thread.is_alive()`，存活则打 warning 并**直接返回正在运行的那个 task_id**、不建新线程；worker 的 `finally` 里用 `if _AI_TASK["task_id"] == task_id` 谨慎释放槽位（避免旧任务误清新任务）。配套查询函数 `ai_task_running()` / `running_ai_task_id()` / `cancel_ai_task(task_id=None)`
+  - **注意与 `ai_concurrency` 区分**：`ai_concurrency` 是「单任务内同时发几个 HTTP 请求」（1-8，默认 4），任务互斥是「同时存在几个任务」。两者是正交维度，别把互斥写进并发参数
+  - **三个入口都要处理「已有任务」**：`JsApi.ai_organize` / `SettingsApi.ai_start` 返回 `{"ok": True, "started": False, "task_id": 现有id, "error": ...}`；前端 `AiSuggestionPanel.startNew` 见 `started === false` 时改为接入现有任务进度 + toast，`settings.js` 则显示橙色提示。`_do_import` 的自动标注钩子先判 `_service_config` 再判 `ai_task_running()`，已有任务时 warning 说明「新图仍处于未标注状态」并跳过（**不要覆盖正在跑的任务**）
+  - 历史坑：早期只有一个全局布尔 `_AI_CANCEL`，第二个任务启动时会把它清零，导致第一个任务再也取消不掉。改成 per-task Event 后消失
+- **进度条必须单调**：`_set_ai()` 对 `progress` 做夹取（0-100）并在 `status=="running"` 时取 `max(旧值, 新值)`；`_ai_tag_worker` 内部再用 `counter[0] = max(counter[0], done)` 二次保证。原因：并发回调到达顺序不确定，直接覆盖会让进度条来回跳。前端 `poll()` 也再取一次 `Math.max` 做双保险
+- **错误分类与重试** (`ai_util`)：`AIServiceError(ValueError)` 带 `kind` / `status` / `retry_after`；`_classify_status()` 把状态码分成 `fatal`(401/402/403/404)、`retryable`(408/409/425/429/5xx)、`transient`。`_open_json()` 必须保留 HTTP 状态码与 `Retry-After` —— **早期实现把所有异常压成同一条字符串，导致 401 和 429 无法区分**。`chat_completion(..., retries=_MAX_RETRIES, should_stop=None)` 对可重试错误退避重试（1s→2s→4s，±30% 抖动，`_sleep_backoff` 分片 0.2s 睡眠以便响应中止），致命错误立即抛
+- **任务级熔断** (`ai_util.CircuitBreaker`)：**不跨任务持久化**（每个 worker 新建一个）。三类触发——致命错误立即熔断、连续 5 次失败、已尝试 ≥20 张且成功率 <50%。`record(ok, err=None)` 返回「是否刚触发」，保证 `on_breaker(reason)` 只回调一次。**本地错误（读文件失败）与内容错误（`kind: "content"`，AI 返回无法解析）必须 `record(True)` 不计入失败**——服务是活的，熔断会误伤
+- **同 hash 去重 + 结果扇出**：`_ai_collect_targets()` 返回 `(items, stats)`（stats 含 `requested`/`invalid`/`missing`/`dup`），用 `seen_hash` 按 `file_hash` 去重，同组后续记录只把 id 塞进首个 item 的 `dup_ids`；标注完成后 `_merge_dup_suggestions(store, targets, results)` 把结果扇出到 `dup_ids`。省额度 + 保证同图标注一致。**`file_hash` 为空串的条目不参与去重**（没哈希无法判定相同）
+- **进度口径**：`on_progress(done, total)` 的 `done` 包含**成功与失败**（每张都回调一次），与 `_AI_STATE["total"]` 同口径；但 `ai_tag_memes` 的**返回值只含成功条目**（`if item.get("name")`），失败条目通过 `on_result` 上报供打日志。二者混用会让「成功 N 张」统计错、前端出现空名称待确认行
+- **终端日志**：`ai_tag_memes(on_result=...)` 每张完成回调一次（含 `error` 字段）；`_ai_tag_worker` 的 `on_result` 按 `ai tag: [idx/total] #id(filename) -> name | ocr=...` 打 INFO，失败打 WARNING。任务开始（scope/model）、去重账目（候选/无效/缺失/去重/实发）、结束统计（成功/失败张数）也都有日志。改这块时保持 `logger.info` 风格与 `_do_import` 的 `logger.info(f"导入完成: {imported} 个")` 一致
+- **增量是硬要求**：`_ai_collect_targets()` 未指定 ids 时走 `db.search(ai_pending_only=True)`。去掉这个过滤会让重跑把全库再算一遍
+- **选中标注的跳过要报账**：指定 `meme_ids` 时，无效 id 打 `跳过无效 id %s`、原图缺失打 `跳过 %s（本地文件缺失）`，并计入 `stats["invalid"]`/`stats["missing"]`。**不要静默 continue**——用户选了 20 张只标注了 17 张却没有任何提示，会被当成 bug
+- **base_url 规范化** (`ai_util._normalize_base_url`)：只在结尾不是 `/v1` 时补齐。中转站两种写法都要能吃下，硬拼会产生 `/v1/v1/chat/completions` 404
+- **图片压缩** (`encode_image_base64`)：动图取中间帧（`seek(n//2)`）、最长边压到 512、JPEG q80；**压缩后更大的话保留原图**；无 Pillow 时退化为原图直传。大 GIF 直传会让 token 爆炸
+- **解析容错** (`_parse_ai_json`)：直接 JSON → ```` ```json ```` 块 → 首个 `{...}` 三档降级；文本再经 `clean_display_name()` 去掉文件名非法字符（含 `\r\n\t`）、压空白、限长 60
+- **密钥**：`ai_api_key` 在 `config._SECRET_KEYS` 内（现有 8 个），加密方式与其余密钥一致（`crypto_util` PBKDF2(machine_id, 600000) → Fernet，**机器绑定**）；`ai_save_config` 对空密钥视为「保持原值」
+- **跨端传递**：`manifest.build()` 写入 `ai_description`/`ai_ocr_text`；`sync._merge_remote_ai()` 与 `lan._merge_ai_fields()` 一律「远端有值且本地为空才写」。`lan._import_bytes` 支持 `original_name`/`ai_description`/`ai_ocr_text` 三个可选参数（`_cmd_push_file` 从帧里透传，兼容 `name` 键）——**否则对端发来的哈希文件名会把本地有意义的显示名刷成十六进制串**
+- **前端**：`src/vue-src/components/AiSuggestionPanel.vue`，标题栏第二个图标按钮入口。`open(memeIds)` **先启动选中项标注**（`startNew` 返回 `false` 即启动失败，多半是没配 AI 服务，此时才退回展示存量建议）；`scopeCount` 驱动「仅标注选中的 N 张」标签，`App.vue` 的 `aiScopeHint` 驱动按钮 title。**选中标注必须优先于存量建议**——早期版本先查存量建议就 `return`，导致用户选中的图压根没被送进标注。改 `App.vue` / 新增组件后必须 `npx vite build`
+- **自动标注**：`ai_auto_tag_on_import` 开启时，`_do_import` 末尾在导入完成后后台起 `start_ai_tag(meme_ids=imported_ids)`；`self._cfg` 可能为 None（隔离测试环境），取配置前必须做空值保护。**已有任务在跑时跳过自动标注**（见上「全局任务互斥」），不要打断用户正在进行的批次
+- **测试**：
+  - `tests/test_ai_util.py` 覆盖进度单调、回调口径、失败隔离、空输入、提前中止、名称清洗、JSON 三档解析，以及 `_classify_status` 参数化、`AIServiceError` 分类标志、`_open_json` 保留状态码、退避重试（成功/致命不重试/达上限放弃/结构异常重试）、`_sleep_backoff` 可中止、`CircuitBreaker` 四类行为、`ai_tag_memes` 熔断提前退出与本地/内容错误不熔断。全部打桩，不联网
+  - `tests/test_ai_runtime.py` 跑**真实 worker 全链路**（mock db/文件/配置，不 mock `ai_tag_memes` 之外的编排）：任务互斥拒绝第二次启动并返回同一 id、熔断后状态 error 且保留成功建议、同 hash 只发一次请求且扇出到全部 id、取消收敛到 cancelled、task_id 不匹配的取消被忽略。**改动 `start_ai_tag` / `_ai_tag_worker` / `_ai_collect_targets` 后必跑这个文件**
+- **成本量级**：单张 ≈ 512px JPEG 的输入 + ≤300 token 输出；859 张全库一轮 ≈ 数十万 token。改 prompt 或提高并发前先想清楚账单
 
 ## 构建 & 测试
 ```bash

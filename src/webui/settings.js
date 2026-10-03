@@ -273,6 +273,123 @@ async function refreshLanStatus() {
   }, 5000);
 }
 
+/* AI 自动标注 */
+function setSelectOptions(el, options, current) {
+  if (!el) return;
+  el.innerHTML = '';
+  (options || []).forEach((item) => {
+    const value = typeof item === 'string' ? item : item.id;
+    const label = typeof item === 'string' ? item : item.label || item.id;
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    el.appendChild(opt);
+  });
+  if (current) el.value = current;
+}
+
+function applyAISettings(s) {
+  const url = document.getElementById('s-ai-base-url');
+  if (url) url.value = s.ai_base_url || '';
+  const key = document.getElementById('s-ai-api-key');
+  if (key) key.value = s.ai_api_key || '';
+  const model = document.getElementById('s-ai-model');
+  const savedModel = s.ai_model || '';
+  if (model) {
+    const existing = Array.from(model.options).map((o) => o.value);
+    const options = existing.slice();
+    if (savedModel && !existing.includes(savedModel)) options.unshift(savedModel);
+    setSelectOptions(model, options, savedModel);
+  }
+  const style = document.getElementById('s-ai-style');
+  if (style) style.value = s.ai_organize_style || 'general';
+  const batch = document.getElementById('s-ai-batch-size');
+  if (batch) batch.value = String(s.ai_batch_size ?? 50);
+  const conc = document.getElementById('s-ai-concurrency');
+  if (conc) conc.value = String(s.ai_concurrency ?? 4);
+  const auto = document.getElementById('s-ai-auto-tag');
+  if (auto) auto.checked = s.ai_auto_tag_on_import === true;
+}
+
+function collectAISettings() {
+  return {
+    ai_base_url: (document.getElementById('s-ai-base-url')?.value || '').trim(),
+    ai_api_key: (document.getElementById('s-ai-api-key')?.value || '').trim(),
+    ai_model: document.getElementById('s-ai-model')?.value || '',
+    ai_organize_style: document.getElementById('s-ai-style')?.value || 'general',
+    ai_batch_size: parseInt(document.getElementById('s-ai-batch-size')?.value) || 50,
+    ai_concurrency:
+      parseInt(document.getElementById('s-ai-concurrency')?.value) || 4,
+    ai_auto_tag_on_import:
+      document.getElementById('s-ai-auto-tag')?.checked === true,
+  };
+}
+
+function setAIStatus(msg, ok) {
+  const el = document.getElementById('s-ai-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = ok === undefined
+    ? 'var(--muted)'
+    : ok ? '#4caf50' : '#f44336';
+}
+
+async function fetchAIModels() {
+  setAIStatus('正在拉取...', undefined);
+  const url = (document.getElementById('s-ai-base-url')?.value || '').trim();
+  const key = (document.getElementById('s-ai-api-key')?.value || '').trim();
+  const r = await api('ai_list_models', url, key);
+  if (!r || !r.ok) {
+    setAIStatus((r && r.error) || '拉取失败', false);
+    return;
+  }
+  const models = r.models || [];
+  if (!models.length) {
+    setAIStatus('连接成功，但该地址未返回模型', false);
+    return;
+  }
+  const current = document.getElementById('s-ai-model')?.value || '';
+  const options = models.map((m) => ({
+    id: m.id,
+    label: m.vision ? m.id + '（多模态）' : m.id,
+  }));
+  setSelectOptions(document.getElementById('s-ai-model'), options, current);
+  const vision = models.filter((m) => m.vision).length;
+  setAIStatus('共 ' + models.length + ' 个模型，其中 ' + vision + ' 个疑似多模态', true);
+}
+
+async function testAIConnection() {
+  setAIStatus('测试中...', undefined);
+  const url = (document.getElementById('s-ai-base-url')?.value || '').trim();
+  const key = (document.getElementById('s-ai-api-key')?.value || '').trim();
+  const r = await api('ai_test_connection', url, key);
+  if (r && r.ok) setAIStatus(r.message || '连接成功', true);
+  else setAIStatus((r && r.error) || '连接失败', false);
+}
+
+async function startAITagging() {
+  const el = document.getElementById('s-ai-run-status');
+  if (el) { el.textContent = '正在保存配置并启动...'; el.style.color = 'var(--muted)'; }
+  await api('ai_save_config', collectAISettings());
+  const batch = parseInt(document.getElementById('s-ai-batch-size')?.value) || 50;
+  const r = await api('ai_start', batch);
+  if (r && r.ok && r.started === false) {
+    // 已有任务在跑：不覆盖状态，如实告知
+    if (el) {
+      el.textContent = r.error || '已有标注任务正在进行';
+      el.style.color = '#ff9800';
+    }
+  } else if (r && r.ok) {
+    if (el) {
+      el.textContent = '标注已在后台进行，请在主窗口查看进度与建议';
+      el.style.color = '#4caf50';
+    }
+  } else if (el) {
+    el.textContent = '启动失败，请检查 AI 配置';
+    el.style.color = '#f44336';
+  }
+}
+
 /* Load settings */
 async function getSettings() {
   const s = await api('get_settings');
@@ -348,8 +465,7 @@ async function getSettings() {
   if (lport) lport.value = s.lan_port || 17852;
   const lsec = document.getElementById('s-lan-secret');
   if (lsec) lsec.value = s.lan_secret || '';
-  const tgtd = document.getElementById('s-tg-tdata');
-  if (tgtd && s.tg_tdata_path) tgtd.value = s.tg_tdata_path;
+  applyAISettings(s);
   checkConnectivity();  // DeepSeek V4 Flash
   loadStorageInfo();
   refreshLanStatus();
@@ -606,6 +722,7 @@ async function saveSettings() {
   const lan_port = parseInt(document.getElementById('s-lan-port')?.value) || 17852;
   const lan_secret = document.getElementById('s-lan-secret')?.value || '';
   const hover_play = document.getElementById('s-hover-play')?.checked === true;
+  const ai = collectAISettings();
   await api('save_settings', {
     hotkey, hotkey_show_at_mouse, auto_play_gif: gif, hover_to_play: hover_play,
     try_original_image: try_original,  // DeepSeek V4 Flash
@@ -613,6 +730,7 @@ async function saveSettings() {
     auto_start, silent_start, show_uncategorized, record_recent_use,
     show_startup_animation,
     lan_port, lan_secret,
+    ...ai,
     ...sync
   });
   showToast('设置已保存');
@@ -632,8 +750,6 @@ async function resetSettings() {
     if (gif) gif.checked = s.auto_play_gif !== false;
     const hp = document.getElementById('s-hover-play');
     if (hp) hp.checked = s.hover_to_play === true;
-    const tgtd = document.getElementById('s-tg-tdata');
-    if (tgtd) tgtd.value = s.tg_tdata_path || '';
     const to = document.getElementById('s-try-original');  // DeepSeek V4 Flash
     if (to) to.checked = false;
     const cm = document.getElementById('s-copy-mode');
@@ -1169,182 +1285,6 @@ async function startDYImport() {
   }, 300);
 }
 
-/* Telegram 缓存导入 */
-let tgPollTimer = null;
-
-function openTGImportDialog() {
-  rememberSettingsFocus();
-  document.getElementById('tg-import-overlay').style.display = 'flex';
-  document.getElementById('tg-config').style.display = 'block';
-  document.getElementById('tg-progress').style.display = 'none';
-  document.getElementById('tg-import-error').style.display = 'none';
-  const status = document.getElementById('tg-status');
-  if (status) { status.textContent = ''; status.className = ''; }
-  const btn = document.getElementById('btn-tg-start');
-  if (btn) btn.disabled = false;
-  const passcode = document.getElementById('s-tg-passcode');
-  if (passcode) passcode.focus();
-}
-
-function formatDuration(sec) {
-  sec = Math.max(0, Math.round(sec || 0));
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  if (m > 0) return m + '分' + (s > 0 ? s + '秒' : '');
-  return s + '秒';
-}
-
-function updateTgEta(s) {
-  const el = document.getElementById('tg-import-eta');
-  if (!el || !s) return;
-  const prog = s.progress || 0;
-  const elapsed = s.elapsed_s || 0;
-  const terminal = ['done', 'error', 'cancelled'].includes(s.status);
-  if (prog <= 0 || elapsed <= 0 || terminal) {
-    el.textContent = elapsed > 0 ? '已用 ' + formatDuration(elapsed) : '';
-    return;
-  }
-  const remain = (100 - prog) / prog * elapsed;
-  el.textContent = '已用 ' + formatDuration(elapsed) + ' · 预计剩余 ' + formatDuration(remain);
-}
-
-function showTGOverlay() {
-  document.getElementById('tg-config').style.display = 'none';
-  document.getElementById('tg-progress').style.display = 'block';
-  document.getElementById('tg-import-overlay').style.display = 'flex';
-  document.getElementById('tg-import-error').style.display = 'none';
-  document.getElementById('btn-tg-retry').style.display = 'none';
-  document.getElementById('tg-import-title').textContent = '正在导入...';
-  document.getElementById('tg-import-msg').textContent = '准备中';
-  document.getElementById('tg-import-bar').style.width = '0%';
-  document.getElementById('tg-import-pct').textContent = '0%';
-  const etaEl = document.getElementById('tg-import-eta');
-  if (etaEl) etaEl.textContent = '';
-  const closeBtn = document.getElementById('btn-tg-close');
-  if (closeBtn) closeBtn.focus();
-}
-
-function closeTGOverlay() {
-  document.getElementById('tg-import-overlay').style.display = 'none';
-  restoreSettingsFocus();
-  if (tgPollTimer) { clearInterval(tgPollTimer); tgPollTimer = null; }
-  api('cancel_tg_import');
-}
-
-async function pickTGTdata() {
-  const r = await api('pick_tg_tdata');
-  if (!r || r.cancelled) return;
-  const inp = document.getElementById('s-tg-tdata');
-  if (r.ok && inp) {
-    inp.value = r.path;
-    showToast('tdata 目录已设置');
-  } else {
-    showToast((r && r.error) || '选择失败');
-  }
-}
-
-function tgRetryPick() {
-  closeTGOverlay();
-  pickTGTdata();
-  openTGImportDialog();
-}
-
-async function startTGImport() {
-  const btn = document.getElementById('btn-tg-start');
-  const status = document.getElementById('tg-status');
-  if (!btn || !status) return;
-  btn.disabled = true; status.textContent = ''; status.className = '';
-
-  const tdataEl = document.getElementById('s-tg-tdata');
-  const passcodeEl = document.getElementById('s-tg-passcode');
-  const convertEl = document.getElementById('s-tg-convert');
-  const tdata = tdataEl ? tdataEl.value : '';
-  const passcode = passcodeEl ? passcodeEl.value : '';
-  const convert = convertEl ? convertEl.checked !== false : true;
-
-  let r;
-  try {
-    r = await api('start_tg_import', tdata || null, passcode, convert);
-  } catch (e) {
-    btn.disabled = false;
-    status.textContent = '启动失败: ' + (e.message || e);
-    status.className = 'error';
-    return;
-  }
-  if (!r || !r.ok) {
-    btn.disabled = false;
-    status.textContent = '启动失败';
-    status.className = 'error';
-    return;
-  }
-
-  showTGOverlay();
-
-  let nullCount = 0;
-  let pollInFlight = false;
-  tgPollTimer = setInterval(async () => {
-    if (pollInFlight) return;
-    pollInFlight = true;
-    try {
-      const s = await api('get_tg_import_progress');
-      if (!s) {
-        nullCount++;
-        if (nullCount > 20) {
-          if (tgPollTimer) { clearInterval(tgPollTimer); tgPollTimer = null; }
-          document.getElementById('tg-import-title').textContent = '导入失败';
-          document.getElementById('tg-import-error').style.display = '';
-          document.getElementById('tg-import-error').textContent = '连接中断';
-          btn.disabled = false;
-        }
-        return;
-      }
-      nullCount = 0;
-
-      document.getElementById('tg-import-bar').style.width = (s.progress || 0) + '%';
-      document.getElementById('tg-import-pct').textContent = (s.progress || 0) + '%';
-      document.getElementById('tg-import-msg').textContent = s.message || '';
-      updateTgEta(s);
-
-      if (s.status === 'done') {
-        document.getElementById('tg-import-title').textContent = '导入完成';
-        if (tgPollTimer) { clearInterval(tgPollTimer); tgPollTimer = null; }
-        const el = document.getElementById('tg-status');
-        el.textContent = s.message || '导入完成';
-        el.className = '';
-        if (passcodeEl) passcodeEl.value = '';
-        btn.disabled = false;
-      } else if (s.status === 'error') {
-        document.getElementById('tg-import-title').textContent = '导入失败';
-        if (tgPollTimer) { clearInterval(tgPollTimer); tgPollTimer = null; }
-        const el = document.getElementById('tg-status');
-        let errMsg = s.error || '未知错误';
-        if (s.error_code === 'no_ffmpeg') {
-          errMsg += '；安装 ffmpeg 后可重试，或取消勾选「WebM 转 WebP」直接导入静态贴纸';
-        }
-        el.textContent = '导入失败: ' + errMsg;
-        el.className = 'error';
-        document.getElementById('tg-import-error').style.display = '';
-        document.getElementById('tg-import-error').textContent = errMsg;
-        if (['no_tdata', 'invalid_tdata', 'no_cache'].includes(s.error_code)) {
-          document.getElementById('btn-tg-retry').style.display = '';
-        }
-        btn.disabled = false;
-      } else if (s.status === 'cancelled') {
-        document.getElementById('tg-import-title').textContent = '已取消';
-        if (tgPollTimer) { clearInterval(tgPollTimer); tgPollTimer = null; }
-        btn.disabled = false;
-      }
-    } catch (e) {
-      if (tgPollTimer) { clearInterval(tgPollTimer); tgPollTimer = null; }
-      document.getElementById('tg-import-title').textContent = '导入失败';
-      document.getElementById('tg-import-error').style.display = '';
-      document.getElementById('tg-import-error').textContent = e.message || '连接异常';
-      btn.disabled = false;
-    } finally {
-      pollInFlight = false;
-    }
-  }, 300);
-}
 
 /* 微信缓存导入 */
 let wechatPollTimer = null;
@@ -1824,11 +1764,6 @@ document.addEventListener('keydown', (e) => {
     const dyOverlay = document.getElementById('dy-import-overlay');
     if (dyOverlay && dyOverlay.style.display === 'flex') {
       closeDYOverlay();
-      return;
-    }
-    const tgOverlay = document.getElementById('tg-import-overlay');
-    if (tgOverlay && tgOverlay.style.display === 'flex') {
-      closeTGOverlay();
       return;
     }
     const wechatOverlay = document.getElementById('wechat-import-overlay');

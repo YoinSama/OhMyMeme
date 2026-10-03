@@ -449,7 +449,14 @@ class LanServer:
             pass  # sha256 校验通过
         elif expected:
             return {"ok": False, "error": "文件哈希不一致"}
-        return _import_bytes(data, filename)
+        return _import_bytes(
+            data,
+            filename,
+            # 兼容两种写法：新客户端发 original_name，旧/第三方可能发 name
+            original_name=msg.get("original_name") or msg.get("name") or "",
+            ai_description=msg.get("ai_description", "") or "",
+            ai_ocr_text=msg.get("ai_ocr_text", "") or "",
+        )
 
     def _cmd_get_config(self) -> dict:
         # 配置拉取：allow_secret_config 关闭时剔除密钥字段
@@ -550,8 +557,18 @@ def _find_meme_file(filename: str):
     return None
 
 
-def _import_bytes(data: bytes, filename: str) -> dict:
-    """把收到的文件字节校验合法性后按哈希去重入库（不合法不落盘，杜绝孤儿文件）"""
+def _import_bytes(
+    data: bytes,
+    filename: str,
+    original_name: str = "",
+    ai_description: str = "",
+    ai_ocr_text: str = "",
+) -> dict:
+    """把收到的文件字节校验合法性后按哈希去重入库（不合法不落盘，杜绝孤儿文件）
+
+    original_name / ai_description / ai_ocr_text 由发送端随文件带上；
+    缺省时才回退为文件名的主干，避免对端有意义的显示名被哈希名覆盖。
+    """
     db = get_db()
     cache_dir = get_config().cache_dir
     ext = _detect_ext(data[:16]) or os.path.splitext(filename)[1] or ".png"
@@ -575,24 +592,58 @@ def _import_bytes(data: bytes, filename: str) -> dict:
     if max(w, h) > _IMPORT_MAX_PX:
         return {"ok": False, "error": "分辨率超过 %dK 限制" % (_IMPORT_MAX_PX // 1000)}
     fhash = hashlib.sha256(data).hexdigest()
-    if db.get_by_hash(fhash):
+    exist = db.get_by_hash(fhash)
+    if exist:
+        _merge_ai_fields(db, exist, ai_description, ai_ocr_text)
         return {"ok": True, "dedup": True}
     dst = cache_dir / f"{fhash[:16]}{ext}"
     try:
         dst.write_bytes(data)
     except OSError:
         return {"ok": False, "error": "写入缓存失败"}
-    db.add_meme(
+    oname = str(original_name or "").strip() or os.path.splitext(filename)[0]
+    meme_id = db.add_meme(
         filename=dst.name,
         file_hash=fhash,
         width=w,
         height=h,
         file_size=len(data),
         mime_type=f"image/{ext[1:]}",
-        original_name=os.path.splitext(filename)[0],
+        original_name=oname,
     )
+    # AI 标注随文件一并接收：仅在传了值时写入，不影响未使用该字段的客户端
+    _merge_ai_fields(db, {"id": meme_id}, ai_description, ai_ocr_text, read=True)
     build_manifest()
     return {"ok": True, "filename": dst.name}
+
+
+def _merge_ai_fields(
+    db, row: dict, ai_description: str, ai_ocr_text: str, read: bool = False
+):
+    """把对方传来的 AI 标注补进本地记录：远端有值且本地为空才写
+
+    read=True 表示 row 只有 id（刚插入的行），需要先读一次再判断。
+    """
+    wanted = {}
+    for key, val in (("ai_description", ai_description), ("ai_ocr_text", ai_ocr_text)):
+        val = str(val or "").strip()
+        if val:
+            wanted[key] = val
+    if not wanted:
+        return 0
+    if read:
+        row = db.get_by_id(row["id"]) or {}
+    if not row.get("id"):
+        return 0
+    updates = {k: v for k, v in wanted.items() if not str(row.get(k) or "").strip()}
+    if not updates:
+        return 0
+    try:
+        db.update_meme(row["id"], **updates)
+        return len(updates)
+    except Exception as e:
+        logger.warning(f"ai fields update failed: {e}")
+        return 0
 
 
 def _detect_ext(data: bytes):

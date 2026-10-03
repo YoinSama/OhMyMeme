@@ -5,6 +5,7 @@ import { useDragSort } from './composables/useDragSort'
 import { useContextMenu, type MenuItem } from './composables/useContextMenu'
 import { useCollectionBuilder, flattenCollections, type CollectionOption } from './composables/useCollectionBuilder'
 import ContextMenu from './components/ContextMenu.vue'
+import AiSuggestionPanel from './components/AiSuggestionPanel.vue'
 import CollectionBuilder from './components/CollectionBuilder.vue'
 import CollectionTreeNode from './components/CollectionTreeNode.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -26,6 +27,7 @@ const updateDialog = ref<InstanceType<typeof UpdateDialog> | null>(null)
 const inputDialog = ref<InstanceType<typeof InputDialog> | null>(null)
 const confirmDialog = ref<InstanceType<typeof ConfirmDialog> | null>(null)
 const similarImportDialog = ref<InstanceType<typeof SimilarImportDialog> | null>(null)
+const aiPanel = ref<InstanceType<typeof AiSuggestionPanel> | null>(null)
 
 // 统一确认对话框（替代原生 confirm，风格与重构主题一致）
 async function confirmAsk(title: string, message: string): Promise<boolean> {
@@ -267,6 +269,27 @@ function syncDownload() {
 }
 
 function onSyncDone() {
+  search()
+  refreshTags()
+  refreshCollections()
+}
+
+// 打开 AI 标注面板：多选模式下把当前选中项作为标注目标，否则按后端增量取未标注的
+function openAiPanel() {
+  const ids = selectMode.value && state.selectedIds.size
+    ? Array.from(state.selectedIds)
+    : undefined
+  aiPanel.value?.open(ids)
+}
+
+// 多选模式下选中了图片时，标题栏 AI 按钮提示将带动画，明确「标注范围 = 已选」
+const aiScopeHint = computed(
+  () => (selectMode.value && state.selectedIds.size
+    ? `AI 标注（选中的 ${state.selectedIds.size} 张）`
+    : 'AI 标注'),
+)
+
+function onAiApplied() {
   search()
   refreshTags()
   refreshCollections()
@@ -938,6 +961,9 @@ onUnmounted(() => {
         <button class="icon-btn" :class="{ 'sort-on': selectMode }" title="多选" aria-label="多选" @click="toggleSelect">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
         </button>
+        <button class="icon-btn" :class="{ 'sort-on': selectMode && state.selectedIds.size > 0 }" :title="aiScopeHint" :aria-label="aiScopeHint" @click="openAiPanel()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 10.5l-5 3.9 1.6 6.1L12 17.2 6.4 20.5 8 14.4 3 10.5l6.1-1.7z"/></svg>
+        </button>
         <button class="icon-btn" title="上传到远端" aria-label="上传到远端" @click="syncUpload()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5m-7 7l7-7 7 7"/></svg>
         </button>
@@ -1116,6 +1142,7 @@ onUnmounted(() => {
   <CollectionBuilder />
   <ImportMenu ref="importMenu" @imported="onImportDone" @importing="onImporting" />
   <ImportProgressOverlay ref="importProgress" @imported="onImportDone" />
+  <AiSuggestionPanel ref="aiPanel" @applied="onAiApplied" />
   <SyncOverlay ref="syncOverlay" @synced="onSyncDone" />
   <TagEditor ref="tagEditor" />
   <UpdateDialog ref="updateDialog" />
