@@ -39,22 +39,58 @@ _MSGS = {
         "en": "ERROR: PyInstaller not found, run: pip install pyinstaller",
     },
     "running": {"zh": "运行:", "en": "Running:"},
-    "build_failed": {"zh": "PyInstaller 打包失败 (code=%d)", "en": "PyInstaller build failed (code=%d)"},
+    "build_failed": {
+        "zh": "PyInstaller 打包失败 (code=%d)",
+        "en": "PyInstaller build failed (code=%d)",
+    },
     "build_done": {"zh": "打包完成:", "en": "Build done:"},
-    "vue_build_failed": {"zh": "Vue 前端构建失败，请检查 node/npm 环境", "en": "Vue frontend build failed, check node/npm environment"},
-    "skip_installer": {"zh": "跳过安装包制作（非 Windows 平台）", "en": "Skipping installer (non-Windows target)"},
-    "iscc_not_found": {"zh": "警告: 未找到 ISCC.exe（InnoSetup），跳过安装包制作", "en": "WARNING: ISCC.exe (InnoSetup) not found, skipping installer"},
-    "outdir_not_found": {"zh": "错误: 未找到输出目录:", "en": "ERROR: output directory not found:"},
-    "run_build_first": {"zh": "请先执行 PyInstaller 构建", "en": "Run PyInstaller build first"},
-    "iss_not_found": {"zh": "错误: InnoSetup 脚本不存在:", "en": "ERROR: InnoSetup script not found:"},
+    "vue_build_failed": {
+        "zh": "Vue 前端构建失败，请检查 node/npm 环境",
+        "en": "Vue frontend build failed, check node/npm environment",
+    },
+    "skip_installer": {
+        "zh": "跳过安装包制作（非 Windows 平台）",
+        "en": "Skipping installer (non-Windows target)",
+    },
+    "iscc_not_found": {
+        "zh": "警告: 未找到 ISCC.exe（InnoSetup），跳过安装包制作",
+        "en": "WARNING: ISCC.exe (InnoSetup) not found, skipping installer",
+    },
+    "outdir_not_found": {
+        "zh": "错误: 未找到输出目录:",
+        "en": "ERROR: output directory not found:",
+    },
+    "run_build_first": {
+        "zh": "请先执行 PyInstaller 构建",
+        "en": "Run PyInstaller build first",
+    },
+    "iss_not_found": {
+        "zh": "错误: InnoSetup 脚本不存在:",
+        "en": "ERROR: InnoSetup script not found:",
+    },
     "building_installer": {"zh": "制作安装包...", "en": "Building installer..."},
     "installer_done": {"zh": "安装包制作完成:", "en": "Installer created:"},
-    "installer_not_found": {"zh": "安装包制作完成，未找到预期文件:", "en": "Installer created but expected file not found:"},
-    "linux_sh_not_found": {"zh": "警告: 未找到 %s，跳过 Linux 打包", "en": "WARNING: %s not found, skipping Linux packaging"},
+    "installer_not_found": {
+        "zh": "安装包制作完成，未找到预期文件:",
+        "en": "Installer created but expected file not found:",
+    },
+    "linux_sh_not_found": {
+        "zh": "警告: 未找到 %s，跳过 Linux 打包",
+        "en": "WARNING: %s not found, skipping Linux packaging",
+    },
     "building_linux": {"zh": "制作 Linux 包...", "en": "Building Linux packages..."},
-    "linux_failed": {"zh": "Linux 打包失败 (code=%d)", "en": "Linux packaging failed (code=%d)"},
-    "building_macos": {"zh": "制作 macOS 包（.app/.dmg）...", "en": "Building macOS packages (.app/.dmg)..."},
-    "macos_failed": {"zh": "macOS 打包失败 (code=%d)", "en": "macOS packaging failed (code=%d)"},
+    "linux_failed": {
+        "zh": "Linux 打包失败 (code=%d)",
+        "en": "Linux packaging failed (code=%d)",
+    },
+    "building_macos": {
+        "zh": "制作 macOS 包（.app/.dmg）...",
+        "en": "Building macOS packages (.app/.dmg)...",
+    },
+    "macos_failed": {
+        "zh": "macOS 打包失败 (code=%d)",
+        "en": "macOS packaging failed (code=%d)",
+    },
     "installer_only_unsupported": {
         "zh": "错误: --installer-only 不支持当前目标 %s",
         "en": "ERROR: --installer-only not supported for target %s",
@@ -69,18 +105,21 @@ _MSGS = {
     },
     "keyfinder_required": {
         "zh": "错误: 构建 wechat_keyfinder 失败。helper 随包内置，缺失会导致微信导入不可用，"
-              "故中止打包。请安装 cmake + MSVC（VS BuildTools 即可）后重试；"
-              "仅本地开发可加 --allow-missing-keyfinder 跳过此检查。",
+        "故中止打包。请安装 cmake + MSVC（VS BuildTools 即可）后重试；"
+        "仅本地开发可加 --allow-missing-keyfinder 跳过此检查。",
         "en": "ERROR: building wechat_keyfinder failed. The helper ships inside the installer, "
-              "so packaging aborts to avoid producing a build without WeChat import support. "
-              "Install cmake + MSVC (VS BuildTools is enough) and retry; "
-              "local development only may pass --allow-missing-keyfinder to skip this check.",
+        "so packaging aborts to avoid producing a build without WeChat import support. "
+        "Install cmake + MSVC (VS BuildTools is enough) and retry; "
+        "local development only may pass --allow-missing-keyfinder to skip this check.",
     },
     "keyfinder_no_cmake": {
         "zh": "错误: 未找到 cmake，无法构建 wechat_keyfinder",
         "en": "ERROR: cmake not found, cannot build wechat_keyfinder",
     },
-    "keyfinder_building": {"zh": "编译 wechat_keyfinder...", "en": "Building wechat_keyfinder..."},
+    "keyfinder_building": {
+        "zh": "编译 wechat_keyfinder...",
+        "en": "Building wechat_keyfinder...",
+    },
     "keyfinder_build_failed": {
         "zh": "错误: wechat_keyfinder 编译失败",
         "en": "ERROR: wechat_keyfinder build failed",
@@ -116,7 +155,7 @@ _MSGS = {
     },
     "verify_no_version": {
         "zh": "错误: helper 缺失版本资源 CompanyName（当前: %s）——"
-              "无元数据会让产物退回被 Defender 误报的特征",
+        "无元数据会让产物退回被 Defender 误报的特征",
         "en": "ERROR: helper has no version resource CompanyName (got: %s) — "
         "missing metadata reintroduces the Defender false-positive signal",
     },
@@ -197,8 +236,16 @@ def build_keyfinder_helper(allow_missing=False):
     build_dir = PROJECT_ROOT / "build" / "wechat_keyfinder"
     print(L("keyfinder_building"))
     # 不指定 -G：由 cmake 选用本机最新 Visual Studio 生成器（CI/local 均可）
-    configure = ["cmake", "-S", str(src_dir), "-B", str(build_dir), "-A", "x64",
-                 "-DWKF_ENABLE_TEST_KEY=OFF"]
+    configure = [
+        "cmake",
+        "-S",
+        str(src_dir),
+        "-B",
+        str(build_dir),
+        "-A",
+        "x64",
+        "-DWKF_ENABLE_TEST_KEY=OFF",
+    ]
     result = subprocess.run(configure, cwd=str(PROJECT_ROOT))
     if result.returncode == 0:
         result = subprocess.run(
@@ -435,17 +482,26 @@ def build_pyinstaller(target=None):
     sep = ";" if IS_WINDOWS else ":"
 
     cmd = [
-        PYTHON, "-m", "PyInstaller",
+        PYTHON,
+        "-m",
+        "PyInstaller",
         "--onedir",
-        "--name", APP_NAME,
-        "--distpath", str(BUILD_DIR),
-        "--specpath", str(PROJECT_ROOT / "build"),
+        "--name",
+        APP_NAME,
+        "--distpath",
+        str(BUILD_DIR),
+        "--specpath",
+        str(PROJECT_ROOT / "build"),
         "--noconfirm",
         "--clean",
-        "--add-data", str(SRC_DIR / "webui") + sep + "src/webui",
-        "--add-data", str(SRC_DIR / "resources") + sep + "src/resources",
-        "--add-data", str(SRC_DIR / "adb-help.txt") + sep + "src/adb-help.txt",
-        "--add-data", str(PROJECT_ROOT / "config" / "offsets.json") + sep + "config",
+        "--add-data",
+        str(SRC_DIR / "webui") + sep + "src/webui",
+        "--add-data",
+        str(SRC_DIR / "resources") + sep + "src/resources",
+        "--add-data",
+        str(SRC_DIR / "adb-help.txt") + sep + "src/adb-help.txt",
+        "--add-data",
+        str(PROJECT_ROOT / "config" / "offsets.json") + sep + "config",
     ]
     keyfinder = SRC_DIR / "wechat_keyfinder" / "wechat_keyfinder.exe"
     if IS_WINDOWS and target in (None, "Windows"):
@@ -457,15 +513,28 @@ def build_pyinstaller(target=None):
         else:
             print(L("keyfinder_missing", keyfinder))
     cmd += [
-        "--hidden-import", "src.main",
+        "--hidden-import",
+        "src.main",
         str(PROJECT_ROOT / "scripts" / "launcher.py"),
     ]
 
     exclude = [
-        "numpy", "PyQt5", "PyQt5.QtCore", "PyQt5.QtGui",
-        "PyQt5.QtWidgets", "PyQt5.QtNetwork", "PyQt5.QtSvg",
-        "psutil", "setuptools", "pkg_resources", "pyreadline3",
-        "yaml", "tornado", "jaraco", "jaraco.text", "jaraco.functools",
+        "numpy",
+        "PyQt5",
+        "PyQt5.QtCore",
+        "PyQt5.QtGui",
+        "PyQt5.QtWidgets",
+        "PyQt5.QtNetwork",
+        "PyQt5.QtSvg",
+        "psutil",
+        "setuptools",
+        "pkg_resources",
+        "pyreadline3",
+        "yaml",
+        "tornado",
+        "jaraco",
+        "jaraco.text",
+        "jaraco.functools",
     ]
     for m in exclude:
         cmd += ["--exclude-module", m]
@@ -527,6 +596,7 @@ def _ensure_lang_file(iscc_exe):
     lang_dir.mkdir(parents=True, exist_ok=True)
     try:
         import urllib.request
+
         print("Downloading ChineseSimplified.isl...")
         urllib.request.urlretrieve(_LANG_URL, lang_file)
     except Exception as e:
@@ -578,8 +648,8 @@ def build_installer(version, target=None, filename_version=None):
         '#define SourceDir "%s"' % source_dir_abs,
     )
     iss_content = iss_content.replace(
-        'OutputDir=..\\..\\dist',
-        'OutputDir=%s' % str(BUILD_DIR.resolve()),
+        "OutputDir=..\\..\\dist",
+        "OutputDir=%s" % str(BUILD_DIR.resolve()),
     )
 
     iss_temp = BUILD_DIR / "ohmy meme.iss"
@@ -743,41 +813,72 @@ def build_macos_packages(version, filename_version=None, arch=None):
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="OhMyMeme build script (PyInstaller)")
-    parser.add_argument("--lang", choices=["zh", "en"], default=None,
-                        help="Output language (auto-detect: zh locally, en on GitHub Actions)")
+    parser.add_argument(
+        "--lang",
+        choices=["zh", "en"],
+        default=None,
+        help="Output language (auto-detect: zh locally, en on GitHub Actions)",
+    )
     parser.add_argument(
         "--version",
         default=None,
-        help="Override version string "
-        "(default: read from src/__init__.py)",
+        help="Override version string " "(default: read from src/__init__.py)",
     )
     parser.add_argument(
         "--nightly",
         action="store_true",
         help="Build a nightly (non-stable) release: version is 'nightly'",
     )
-    parser.add_argument("--installer-only", action="store_true",
-                        help="Only build installer (assumes PyInstaller already ran)")
-    parser.add_argument("--build-only", action="store_true",
-                        help="Only run PyInstaller, skip installer")
-    parser.add_argument("--allow-missing-keyfinder", action="store_true",
-                        help="Continue even if the wechat_keyfinder helper cannot be built "
-                             "(local development only; the packaged app loses WeChat import)")
-    parser.add_argument("--verify-helper", action="store_true",
-                        help="Verify the bundled wechat_keyfinder helper in dist/ "
-                             "(used by CI after packaging; exits non-zero on failure)")
-    parser.add_argument("--package", choices=["all", "appimage", "deb", "rpm"], default="all",
-                        help="Linux package type to build (default: all)")
-    parser.add_argument("--arch", choices=["arm64", "x86_64", "aarch64"], default=None,
-                        help="Architecture (macOS: arm64/x86_64, Linux: aarch64/x86_64, default: auto-detect)")
+    parser.add_argument(
+        "--installer-only",
+        action="store_true",
+        help="Only build installer (assumes PyInstaller already ran)",
+    )
+    parser.add_argument(
+        "--build-only", action="store_true", help="Only run PyInstaller, skip installer"
+    )
+    parser.add_argument(
+        "--allow-missing-keyfinder",
+        action="store_true",
+        help="Continue even if the wechat_keyfinder helper cannot be built "
+        "(local development only; the packaged app loses WeChat import)",
+    )
+    parser.add_argument(
+        "--verify-helper",
+        action="store_true",
+        help="Verify the bundled wechat_keyfinder helper in dist/ "
+        "(used by CI after packaging; exits non-zero on failure)",
+    )
+    parser.add_argument(
+        "--package",
+        choices=["all", "appimage", "deb", "rpm"],
+        default="all",
+        help="Linux package type to build (default: all)",
+    )
+    parser.add_argument(
+        "--arch",
+        choices=["arm64", "x86_64", "aarch64"],
+        default=None,
+        help="Architecture (macOS: arm64/x86_64, Linux: aarch64/x86_64, default: auto-detect)",
+    )
     target_group = parser.add_mutually_exclusive_group()
-    target_group.add_argument("--windows", action="store_true", dest="target_windows",
-                              help="Build for Windows")
-    target_group.add_argument("--linux", action="store_true", dest="target_linux",
-                              help="Build for Linux")
-    target_group.add_argument("--macos", action="store_true", dest="target_macos",
-                              help="Build for macOS (.app + .dmg)")
+    target_group.add_argument(
+        "--windows",
+        action="store_true",
+        dest="target_windows",
+        help="Build for Windows",
+    )
+    target_group.add_argument(
+        "--linux", action="store_true", dest="target_linux", help="Build for Linux"
+    )
+    target_group.add_argument(
+        "--macos",
+        action="store_true",
+        dest="target_macos",
+        help="Build for macOS (.app + .dmg)",
+    )
     parser.set_defaults(target_windows=False, target_linux=False, target_macos=False)
     args = parser.parse_args()
 
@@ -828,16 +929,22 @@ if __name__ == "__main__":
     try:
         if args.installer_only:
             if target == "Windows":
-                build_installer(app_version, target=target, filename_version=build_version)
+                build_installer(
+                    app_version, target=target, filename_version=build_version
+                )
             elif target == "Linux":
-                build_linux_packages(build_version, args.package, pkg_version=app_version, arch=args.arch)
+                build_linux_packages(
+                    build_version, args.package, pkg_version=app_version, arch=args.arch
+                )
             elif target == "Darwin":
-                build_macos_packages(build_version, filename_version=build_version, arch=args.arch)
+                build_macos_packages(
+                    build_version, filename_version=build_version, arch=args.arch
+                )
             else:
                 print(L("installer_only_unsupported", target))
                 sys.exit(1)
         else:
-            # helper 随包分发：先在打包前编译，并按实际产物注入哈希（构建后还原）
+            # helper 随包分发：先编译，再打包（helper 按实际产物注入哈希）
             if target == "Windows":
                 keyfinder = build_keyfinder_helper(
                     allow_missing=args.allow_missing_keyfinder
@@ -848,11 +955,17 @@ if __name__ == "__main__":
             if args.build_only:
                 pass
             elif target == "Windows":
-                build_installer(app_version, target=target, filename_version=build_version)
+                build_installer(
+                    app_version, target=target, filename_version=build_version
+                )
             elif target == "Linux":
-                build_linux_packages(version, args.package, pkg_version=app_version, arch=args.arch)
+                build_linux_packages(
+                    version, args.package, pkg_version=app_version, arch=args.arch
+                )
             elif target == "Darwin":
-                build_macos_packages(version, filename_version=build_version, arch=args.arch)
+                build_macos_packages(
+                    version, filename_version=build_version, arch=args.arch
+                )
     finally:
         if keyfinder_original is not None:
             unpin_keyfinder_hash(keyfinder_original)

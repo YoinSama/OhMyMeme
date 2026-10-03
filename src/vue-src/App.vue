@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useMemes } from './composables/useMemes'
 import { useDragSort } from './composables/useDragSort'
 import { useContextMenu, type MenuItem } from './composables/useContextMenu'
@@ -14,6 +14,7 @@ import ImportProgressOverlay from './components/ImportProgressOverlay.vue'
 import InputDialog from './components/InputDialog.vue'
 import Pager from './components/Pager.vue'
 import SimilarImportDialog from './components/SimilarImportDialog.vue'
+import SetupGuide from './components/SetupGuide.vue'
 import SyncOverlay from './components/SyncOverlay.vue'
 import TagEditor from './components/TagEditor.vue'
 import UpdateDialog from './components/UpdateDialog.vue'
@@ -28,6 +29,11 @@ const inputDialog = ref<InstanceType<typeof InputDialog> | null>(null)
 const confirmDialog = ref<InstanceType<typeof ConfirmDialog> | null>(null)
 const similarImportDialog = ref<InstanceType<typeof SimilarImportDialog> | null>(null)
 const aiPanel = ref<InstanceType<typeof AiSuggestionPanel> | null>(null)
+const setupGuide = ref<InstanceType<typeof SetupGuide> | null>(null)
+
+function showSetupGuide() {
+  setupGuide.value?.show()
+}
 
 // 统一确认对话框（替代原生 confirm，风格与重构主题一致）
 async function confirmAsk(title: string, message: string): Promise<boolean> {
@@ -94,9 +100,18 @@ onMounted(() => {
   // 兜底：视频加载失败或未触发 ended 时最多 6s 后移除遮罩，避免卡死界面
   startupAnimTimer = setTimeout(dismissStartupAnim, 6000)
   // 后端 evaluate_js 刷新入口（设置保存/同步后由 webui.py 调用）
-  window.refreshMemes = () => { search() }
+  window.refreshMemes = () => {
+    window.pywebview?.api?.get_settings?.().then((s: any) => {
+      if (s) state.hoverZoom = s.hover_zoom !== false
+    })
+    search()
+  }
   window.refreshTags = refreshTags
   window.refreshCollections = refreshCollections
+  // 设置页「设置向导」按钮入口（SettingsApi.open_guide 调用）
+  window.showGuide = showSetupGuide
+  // 云端直接使用：后端预取缩略图/入库后通知，刷新网格+标签+分组
+  window.onCloudReady = () => { imgRetries.clear(); thumbRev.value++; search(); refreshTags(); refreshCollections() }
 })
 // 网格列数由 CSS repeat(auto-fill, minmax(112px, 1fr)) 随容器宽度自适应
 
@@ -169,13 +184,79 @@ function onFolderCardContext(e: MouseEvent, childId: number, childName: string) 
   ], { folderId: childId, folderName: childName, isFolder: true }, e.clientX, e.clientY)
 }
 
-async function handleCopy(meme: Meme) {
+async function handleCopy(meme: Meme, e?: Event) {
+  // 云卡点击不冒泡给 drag-select（防止多选模式把云行计入 selectedIds）
+  if (meme.cloud) e?.stopPropagation()
   if (ignoreClick) { ignoreClick = false; return }
   // 整理/多选模式：不复制（勾选由 drag-select 处理）
   if (sortEnabled.value || selectMode.value) return
+  if (meme.cloud) { await cloudDownload(meme); return }
   const ok = await copyMeme(meme.id)
   if (ok) showToast(`${meme.name} 已复制`)
   else showToast('复制失败')
+}
+
+// 云端直接使用：下载中防连点（按文件名）
+const cloudBusy = ref<Record<string, boolean>>({})
+// 下载成功后的遮罩自上而下退场动画（动画结束才刷新列表）
+const cloudWipe = ref<Record<string, boolean>>({})
+// 云端缩略图预取完成后递增，触发云端行 img 重载（补回 404 失败的图片）
+const thumbRev = ref(0)
+
+const CLOUD_ERR_TEXT: Record<string, string> = {
+  busy: '正在下载中',
+  not_found: '云端条目不存在',
+  download_failed: '下载失败',
+  sha_mismatch: '文件校验失败',
+  too_large: '文件超出限制',
+  invalid_image: '无效图片',
+  disabled: '云端直接使用未开启',
+  no_sync: '未配置云端同步',
+}
+
+// 云端直接使用：点击云卡 → 下载校验入库 → 遮罩退场动画 → 自动复制 → 刷新三件套
+async function cloudDownload(meme: Meme) {
+  const fname = meme.filename
+  if (cloudBusy.value[fname]) return
+  cloudBusy.value[fname] = true
+  try {
+    const r = await window.pywebview?.api?.cloud_download(fname)
+    if (r && r.ok) {
+      showToast(r.status === 'copied' ? `${meme.name} 已复制` : `${meme.name} 已下载`)
+      await refreshTags()
+      await refreshCollections()
+      cloudWipe.value[fname] = true
+      await new Promise(res => setTimeout(res, 480))
+      delete cloudWipe.value[fname]
+      search()
+    } else {
+      showToast(CLOUD_ERR_TEXT[r?.status] || '下载失败')
+    }
+  } catch (_) {
+    showToast('下载失败')
+  } finally {
+    delete cloudBusy.value[fname]
+  }
+}
+
+// 缩略图加载失败重试计数（按基础 URL，成功/onCloudReady 后清零）
+const imgRetries = new Map<string, number>()
+
+// 缩略图加载失败（预取未完成/突发连接被拒等）：隐藏破图标并带 cache-buster 有界重试
+function onImgError(e: Event) {
+  const img = e.target as HTMLImageElement
+  const base = img.src.replace(/([?&])r=\d+/, '')
+  img.classList.add('img-error')
+  const n = (imgRetries.get(base) || 0) + 1
+  if (n > 2) return
+  imgRetries.set(base, n)
+  setTimeout(() => { img.src = `${base}${base.includes('?') ? '&' : '?'}r=${Date.now()}` }, 300 * n)
+}
+
+function onImgLoad(e: Event) {
+  const img = e.target as HTMLImageElement
+  img.classList.remove('img-error')
+  imgRetries.delete(img.src.replace(/([?&])r=\d+/, ''))
 }
 
 function showToast(msg: string) {
@@ -188,6 +269,7 @@ function showToast(msg: string) {
 
 // 卡片悬停快速收藏（右键菜单外的一键入口）
 async function quickFavorite(meme: Meme) {
+  if (meme.cloud) return
   if (sortEnabled.value || selectMode.value) return
   const ok = await window.pywebview?.api?.toggle_favorite(meme.id)
   if (ok === null || ok === undefined) return
@@ -208,6 +290,15 @@ function onSearchInput(e: Event) {
 
 function clearSearch() {
   setSearch('')
+  search()
+}
+
+// 点击标题栏 logo 返回主页：清空搜索/标签/分组筛选
+function goHome() {
+  setSearch('')
+  state.activeTags.clear()
+  state.activeCollection = null
+  clearSelection()
   search()
 }
 
@@ -295,10 +386,12 @@ function onAiApplied() {
   refreshCollections()
 }
 
-function rescanCache() {
+async function rescanCache() {
   showToast('缓存刷新中...')
   search()
   refreshCollections()
+  // 同步触发云端清单刷新与缩略图预取（开关关闭/刷新中由后端去重）
+  try { await window.pywebview?.api?.cloud_refresh() } catch (_) {}
 }
 
 function hideWindow() {
@@ -307,7 +400,7 @@ function hideWindow() {
 
 async function onTitlebarMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
-  if ((e.target as HTMLElement).closest('.title-btn') || (e.target as HTMLElement).closest('.icon-btn') || (e.target as HTMLElement).closest('.sidebar-toggle')) return
+  if ((e.target as HTMLElement).closest('.title-btn') || (e.target as HTMLElement).closest('.icon-btn') || (e.target as HTMLElement).closest('.sidebar-toggle') || (e.target as HTMLElement).closest('.logo')) return
   try {
     const gen = dragGeneration
     const nativeDrag = await window.pywebview?.api?.start_window_drag(e.button + 1, e.screenX, e.screenY)
@@ -347,6 +440,9 @@ function onWindowMouseUp() {
 function onMemeRightClick(e: MouseEvent, meme: Meme) {
   e.preventDefault()
   e.stopPropagation()
+  clearHoverPreview()
+  // 云行无本地 id：不弹操作菜单
+  if (meme.cloud) return
   const items: MenuItem[] = [
     { action: 'rename', label: '重命名' },
     { action: 'favorite', label: meme.favorited ? '取消收藏' : '收藏' },
@@ -695,10 +791,12 @@ function memeSrc(meme: Meme): string {
   if (meme.is_animated && meme.auto_play_gif && !meme.hover_to_play) {
     return `/api/original/${meme.id}/${encodeURIComponent(meme.filename)}`
   }
-  return `/api/thumb/${meme.id}/${encodeURIComponent(meme.filename)}`
+  if (meme.cloud) return `/api/thumb/${meme.file_hash}?v=${thumbRev.value}`
+  return `/api/thumb/${meme.file_hash}`
 }
 
-function onCardMouseEnter(meme: Meme) {
+function onCardMouseEnter(meme: Meme, e?: Event) {
+  scheduleHoverPreview(meme, (e?.currentTarget as HTMLElement) || null)
   if (!meme.is_animated || !meme.hover_to_play) return
   const timer = setTimeout(() => {
     const img = document.querySelector(`.meme-card[data-meme-id="${meme.id}"] img`) as HTMLImageElement
@@ -708,6 +806,7 @@ function onCardMouseEnter(meme: Meme) {
 }
 
 function onCardMouseLeave(meme: Meme) {
+  clearHoverPreview()
   const timer = hoverTimers.get(meme.id)
   if (timer) { clearTimeout(timer); hoverTimers.delete(meme.id) }
   if (!meme.is_animated || !meme.hover_to_play) return
@@ -715,11 +814,50 @@ function onCardMouseLeave(meme: Meme) {
   if (img && img.dataset.thumb) img.src = img.dataset.thumb
 }
 
+// 悬停 0.5s 放大预览：格子内 object-fit:cover 裁切，横向长图需浮出完整构图
+const hoverPreview = ref<Meme | null>(null)
+const hoverPreviewPos = ref({ x: 0, y: 0 })
+let hoverPreviewTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearHoverPreview() {
+  if (hoverPreviewTimer) { clearTimeout(hoverPreviewTimer); hoverPreviewTimer = null }
+  hoverPreview.value = null
+}
+
+function previewSrc(meme: Meme): string {
+  if (meme.cloud) return memeSrc(meme)
+  return `/api/original/${meme.id}/${encodeURIComponent(meme.filename)}`
+}
+
+function scheduleHoverPreview(meme: Meme, card: HTMLElement | null) {
+  clearHoverPreview()
+  if (!state.hoverZoom || sortEnabled.value || selectMode.value || !card) return
+  hoverPreviewTimer = setTimeout(() => {
+    hoverPreviewTimer = null
+    if (!card.isConnected) return
+    const r = card.getBoundingClientRect()
+    // 按预览盒上限 min(72vw,900)×72vh（与 style.css .hover-preview img 一致）夹紧中心，保证整盒可见
+    const halfW = Math.min(window.innerWidth * 0.72, 900) / 2
+    const halfH = (window.innerHeight * 0.72) / 2
+    const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), Math.max(min, max))
+    hoverPreviewPos.value = {
+      x: clamp(r.left + r.width / 2, halfW + 8, window.innerWidth - halfW - 8),
+      y: clamp(r.top + r.height / 2, halfH + 8, window.innerHeight - halfH - 8),
+    }
+    hoverPreview.value = meme
+  }, 500)
+}
+
+watch(() => state.memes, clearHoverPreview)
+
 let nativeDragStart: { x: number; y: number; memeId: number } | null = null
 let ignoreClick = false
 
 function onCardPointerDown(e: PointerEvent, meme: Meme, card: HTMLElement) {
+  clearHoverPreview()
   ignoreClick = false
+  // 云行无 id：不参与排序拖拽/原生拖出
+  if (meme.cloud) return
   if (sortEnabled.value && canReorder() && !selectMode.value) {
     drag.onPointerDown(e, meme.id, card)
     return
@@ -883,9 +1021,43 @@ async function onDrop(e: DragEvent) {
 function onDocKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
   if (ctx.visible.value) { ctx.hide(); return }
+  if (hoverPreview.value) { clearHoverPreview(); return }
   if (selectMode.value) { toggleSelect(); return }
   if (sortEnabled.value) { toggleSort(); return }
   hideWindow()
+}
+
+// 侧栏滑动手势：折叠态在侧栏条上右滑展开，展开态在侧栏内左滑折叠（对齐安卓端边缘滑动）
+let swipeStart: { x: number; y: number; collapsed: boolean } | null = null
+let swipeClickGuard = false
+
+function onSidebarSwipeDown(e: PointerEvent) {
+  swipeClickGuard = false
+  swipeStart = null
+  if (e.button !== 0) return
+  if (!(e.target as HTMLElement).closest?.('#sidebar')) return
+  swipeStart = { x: e.clientX, y: e.clientY, collapsed: sidebarCollapsed.value }
+}
+
+function onSidebarSwipeMove(e: PointerEvent) {
+  if (!swipeStart) return
+  const dx = e.clientX - swipeStart.x
+  const dy = e.clientY - swipeStart.y
+  if (Math.abs(dx) < 40 || Math.abs(dx) <= Math.abs(dy)) return
+  if (swipeStart.collapsed && dx > 0 && sidebarCollapsed.value) sidebarCollapsed.value = false
+  else if (!swipeStart.collapsed && dx < 0 && !sidebarCollapsed.value) sidebarCollapsed.value = true
+  else return
+  swipeClickGuard = true
+  swipeStart = null
+}
+
+function onSidebarSwipeEnd() { swipeStart = null }
+
+function onSwipeClickCapture(e: MouseEvent) {
+  if (!swipeClickGuard || e.detail === 0) return
+  swipeClickGuard = false
+  e.stopPropagation()
+  e.preventDefault()
 }
 
 onMounted(() => {
@@ -899,6 +1071,11 @@ onMounted(() => {
   document.addEventListener('pointerup', onDocPointerUp)
   document.addEventListener('pointercancel', onDocPointerCancel)
   document.addEventListener('keydown', onDocKeydown)
+  document.addEventListener('pointerdown', onSidebarSwipeDown)
+  document.addEventListener('pointermove', onSidebarSwipeMove)
+  document.addEventListener('pointerup', onSidebarSwipeEnd)
+  document.addEventListener('pointercancel', onSidebarSwipeEnd)
+  document.addEventListener('click', onSwipeClickCapture, true)
   window.addEventListener('blur', onDocPointerCancel)
 })
 
@@ -913,14 +1090,22 @@ onUnmounted(() => {
   document.removeEventListener('pointerup', onDocPointerUp)
   document.removeEventListener('pointercancel', onDocPointerCancel)
   document.removeEventListener('keydown', onDocKeydown)
+  document.removeEventListener('pointerdown', onSidebarSwipeDown)
+  document.removeEventListener('pointermove', onSidebarSwipeMove)
+  document.removeEventListener('pointerup', onSidebarSwipeEnd)
+  document.removeEventListener('pointercancel', onSidebarSwipeEnd)
+  document.removeEventListener('click', onSwipeClickCapture, true)
   window.removeEventListener('blur', onDocPointerCancel)
   if (updateInterval) { clearInterval(updateInterval); updateInterval = null }
   hoverTimers.forEach(t => clearTimeout(t))
   hoverTimers.clear()
+  if (hoverPreviewTimer) { clearTimeout(hoverPreviewTimer); hoverPreviewTimer = null }
 })
 
 ;(async () => {
   await loadInitData()
+  // 配置无 guide=ok（新装或旧版升级）时启动即弹设置向导；启动动画遮罩 z-index 更高，动画结束后自然露出
+  if (!state.guideOk) setupGuide.value?.show()
   // 动画开启时：播放期间即加载后续内容（动画天然覆盖桥接稳定时间），去除 300ms 延时；
   // 动画关闭时：不播放动画，降级为 300ms 延时
   const runBackground = async () => {
@@ -951,7 +1136,7 @@ onUnmounted(() => {
   <div id="app">
     <header id="titlebar" @mousedown="onTitlebarMouseDown">
       <div class="titlebar__left">
-        <div class="logo">OhMy<span>Meme</span></div>
+        <div class="logo" title="返回主页" @click="goHome">OhMy<span>Meme</span></div>
       </div>
       <span class="spacer"></span>
       <div class="titlebar__actions">
@@ -1048,7 +1233,7 @@ onUnmounted(() => {
           <button class="btn btn-sm btn-danger" :disabled="state.selectedIds.size === 0" @click="batchDelete">批量删除</button>
         </div>
 
-        <div id="grid-wrap">
+        <div id="grid-wrap" @scroll.passive="clearHoverPreview">
           <div v-if="folderCards.length" class="meme-grid folder-grid">
             <div
               v-for="child in folderCards"
@@ -1087,28 +1272,29 @@ onUnmounted(() => {
             >
               <drag-select-option
                 v-for="meme in state.memes"
-                :key="meme.id"
-                :value="meme.id"
+                :key="meme.cloud ? meme.filename : meme.id"
+                :value="meme.cloud ? meme.filename : meme.id"
+                :disabled="!!meme.cloud"
               >
                 <div
                   class="meme-card"
-                  :class="{ 'dragging': drag.dragState.active && drag.dragState.memeId === meme.id, selected: state.selectedIds.has(meme.id) }"
+                  :class="{ 'dragging': drag.dragState.active && drag.dragState.memeId === meme.id, selected: state.selectedIds.has(meme.id), 'cloud-card': !!meme.cloud, 'cloud-downloading': !!cloudBusy[meme.filename], 'cloud-wiping': !!cloudWipe[meme.filename] }"
                   :data-meme-id="meme.id"
                   role="button"
                   tabindex="0"
                   :aria-label="meme.name"
-                  @click="handleCopy(meme)"
+                  @click="handleCopy(meme, $event)"
                   @contextmenu="onMemeRightClick($event, meme)"
                   @pointerdown="onCardPointerDown($event, meme, $event.currentTarget as HTMLElement)"
-                  @mouseenter="onCardMouseEnter(meme)"
+                  @mouseenter="onCardMouseEnter(meme, $event)"
                   @mouseleave="onCardMouseLeave(meme)"
                   @keydown.enter.prevent="handleCopy(meme)"
                   @keydown.space.prevent="handleCopy(meme)"
                 >
-                  <img :src="memeSrc(meme)" :alt="meme.name" loading="lazy">
+                  <img :src="memeSrc(meme)" :alt="meme.name" loading="lazy" @error="onImgError" @load="onImgLoad">
                   <span v-if="state.selectedIds.has(meme.id)" class="select-badge">✓</span>
                   <button
-                    v-if="!selectMode && !sortEnabled"
+                    v-if="!selectMode && !sortEnabled && !meme.cloud"
                     class="fav-btn"
                     :class="{ active: meme.favorited }"
                     :aria-label="meme.favorited ? '取消收藏' : '收藏'"
@@ -1120,6 +1306,9 @@ onUnmounted(() => {
                   </button>
                   <span v-if="meme.from_stego" class="gif-badge stego-badge">隐写导入</span>
                   <span v-else-if="meme.is_animated" class="gif-badge">{{ meme.is_gif ? 'GIF' : 'WebP' }}</span>
+                  <span v-if="meme.cloud" class="cloud-badge" aria-label="云端">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                  </span>
                   <span class="meme-name">{{ meme.name }}</span>
                 </div>
               </drag-select-option>
@@ -1149,6 +1338,7 @@ onUnmounted(() => {
   <InputDialog ref="inputDialog" />
   <ConfirmDialog ref="confirmDialog" />
   <SimilarImportDialog ref="similarImportDialog" />
+  <SetupGuide ref="setupGuide" @open-import-menu="showImportMenu" />
   <ContextMenu
     :visible="ctx.visible.value" :x="ctx.x.value" :y="ctx.y.value"
     :items="ctx.items.value" :trigger="ctx.trigger.value"
@@ -1169,6 +1359,12 @@ onUnmounted(() => {
 
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="loading" :class="{ show: state.loading }"><div class="spinner"></div></div>
+
+  <Transition name="hover-preview-fade">
+    <div v-if="hoverPreview" class="hover-preview" :style="{ left: hoverPreviewPos.x + 'px', top: hoverPreviewPos.y + 'px' }">
+      <img :src="previewSrc(hoverPreview)" :alt="hoverPreview.name">
+    </div>
+  </Transition>
 
   <Transition name="startup-fade">
     <div v-if="startupAnim" id="startup-anim" :style="{ background: state.startupBgColor }" @click="dismissStartupAnim">
